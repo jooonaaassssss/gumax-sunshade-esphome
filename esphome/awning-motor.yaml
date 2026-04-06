@@ -8,6 +8,11 @@
 # See README for full wiring instructions and protocol reference.
 # ===========================================================================
 
+external_components:
+  - source: github://eigger/espcomponents@latest
+    components: [ uartex ]
+    refresh: always
+
 substitutions:
   device_name: awning-motor
   friendly_name: Awning Motor Controller
@@ -18,7 +23,6 @@ substitutions:
 
   # ── Polling ───────────────────────────────────────────────────────────────
   poll_interval: 30s        # How often to query all motors for status
-  offline_timeout_ms: "90000"  # Mark motor offline after this many ms (~3 cycles)
 
   # ── Channel bytes ─────────────────────────────────────────────────────────
   # These must match the channel programmed into each motor (see README).
@@ -36,15 +40,13 @@ substitutions:
 # Per-motor and per-group package includes
 #
 # Each motor_N entry creates:
-#   • one global          (motor_last_seen_N)
-#   • one binary sensor   (awning_N_online)
-#   • one cover entity    (awning_N)
-#   • one poll query step appended to poll_motors via !extend
+#   • one cover entity  (awning_N)  – polls via uartex command_update
+#
+# Each group_N entry creates one optimistic cover entity that broadcasts to
+# all motors on the given channel.
 #
 # To add a motor: copy an existing motor_N block, increment the key, and
-# set motor_id, motor_name, channel_l, channel_h.
-# The availability check, query lambda, and delay are all added automatically
-# by the package via !extend.  No edits needed here.
+# set motor_id, motor_name, channel_l, channel_h.  No other edits needed.
 # ---------------------------------------------------------------------------
 packages:
   # ── Individual motors ─────────────────────────────────────────────────────
@@ -52,74 +54,66 @@ packages:
     !include
       file: packages/motor.yaml
       vars:
-        motor_id: "1"
+        motor_id: 1
         motor_name: "Awning 1"
         channel_l: ${group1_channel_l}
         channel_h: ${group1_channel_h}
-        offline_timeout_ms: ${offline_timeout_ms}
   motor_2:
     !include
       file: packages/motor.yaml
       vars:
-        motor_id: "2"
+        motor_id: 2
         motor_name: "Awning 2"
         channel_l: ${group1_channel_l}
         channel_h: ${group1_channel_h}
-        offline_timeout_ms: ${offline_timeout_ms}
   motor_3:
     !include
       file: packages/motor.yaml
       vars:
-        motor_id: "3"
+        motor_id: 3
         motor_name: "Awning 3"
         channel_l: ${group1_channel_l}
         channel_h: ${group1_channel_h}
-        offline_timeout_ms: ${offline_timeout_ms}
   motor_4:
     !include
       file: packages/motor.yaml
       vars:
-        motor_id: "4"
+        motor_id: 4
         motor_name: "Awning 4"
         channel_l: ${group1_channel_l}
         channel_h: ${group1_channel_h}
-        offline_timeout_ms: ${offline_timeout_ms}
   motor_5:
     !include
       file: packages/motor.yaml
       vars:
-        motor_id: "5"
+        motor_id: 5
         motor_name: "Awning 5"
         channel_l: ${group2_channel_l}
         channel_h: ${group2_channel_h}
-        offline_timeout_ms: ${offline_timeout_ms}
   motor_6:
     !include
       file: packages/motor.yaml
       vars:
-        motor_id: "6"
+        motor_id: 6
         motor_name: "Awning 6"
         channel_l: ${group2_channel_l}
         channel_h: ${group2_channel_h}
-        offline_timeout_ms: ${offline_timeout_ms}
   motor_7:
     !include
       file: packages/motor.yaml
       vars:
-        motor_id: "7"
+        motor_id: 7
         motor_name: "Awning 7"
         channel_l: ${group2_channel_l}
         channel_h: ${group2_channel_h}
-        offline_timeout_ms: ${offline_timeout_ms}
   motor_8:
     !include
       file: packages/motor.yaml
       vars:
-        motor_id: "8"
+        motor_id: 8
         motor_name: "Awning 8"
         channel_l: ${group2_channel_l}
         channel_h: ${group2_channel_h}
-        offline_timeout_ms: ${offline_timeout_ms}
 
   # ── All-awnings broadcast (ID=0, ChanL=0, ChanH=0) ──────────────────────
   # Note: channel-filtered group broadcast (ID=0 with non-zero channel bytes)
@@ -167,128 +161,40 @@ uart:
   rx_pin: ${uart_rx_pin}
   tx_pin: ${uart_tx_pin}
   baud_rate: 2400
-  debug:
-    direction: BOTH
-    sequence:
-      - lambda: UARTDebug::log_hex(direction, bytes, ' ');
 
 # ---------------------------------------------------------------------------
-# RX dispatch globals – written by the 50 ms parser, read by rx_dispatch.
-# rx_mid == 0 means no valid frame was received in the current tick.
-# ---------------------------------------------------------------------------
-globals:
-  - id: rx_mid
-    type: uint8_t
-    restore_value: false
-    initial_value: '0'
-  - id: rx_esp_pos
-    type: float
-    restore_value: false
-    initial_value: '0.0'
-  - id: rx_running
-    type: bool
-    restore_value: false
-    initial_value: 'false'
-# (Per-motor last-seen globals come from the motor packages)
-
-# ---------------------------------------------------------------------------
-# Intervals
+# UARTEx hub – declarative RS485 frame parsing and command dispatch.
 #
-#   50 ms  – drain the UART RX buffer and parse incoming 0xd8 status frames.
-#            Cover positions and online flags update immediately on a valid,
-#            checksum-verified frame.
-#   poll_interval  – kick off the sequential per-motor poll script.
+# RX frame (motor → ESP):  [0xd8] [ID] [CL] [CH] [b4] [b5] [b6] [pos] [zone] [chk]
+#   Header 0xd8 │ 8 payload bytes │ XOR checksum (payload bytes only)
+#   Payload offsets: [0]=ID  [6]=pos(0–100)  [7]=zone(bit0=moving)
+#
+# TX frame (ESP → motor):  [0x9a] [ID] [CL] [CH] [Cmd1] [Cmd2] [chk]
+#   Header 0x9a │ 5 payload bytes │ XOR checksum (payload bytes only)
+#   uartex adds the header and calculates the checksum automatically.
 # ---------------------------------------------------------------------------
-interval:
-  # ── RX frame parser ───────────────────────────────────────────────────────
-  - interval: 50ms
-    then:
-      - lambda: |-
-          id(rx_mid) = 0;  // clear; will be set when a valid frame is received
-          static uint8_t buf[10];
-          static uint8_t buf_pos = 0;
-          while (id(rs485_bus).available()) {
-            uint8_t b;
-            id(rs485_bus).read_byte(&b);
-            if (buf_pos == 0 && b != 0xd8) continue;  // wait for frame head
-            buf[buf_pos++] = b;
-            if (buf_pos < 10) continue;                // accumulate full frame
-            buf_pos = 0;                               // reset for next frame
-            // Verify: XOR of bytes 1–8 must equal byte 9
-            uint8_t chk = 0;
-            for (int i = 1; i <= 8; i++) chk ^= buf[i];
-            if (chk != buf[9]) {
-              // Recovery: the motor always sends the frame twice.  Occasionally
-              // the checksum byte of frame-1 AND the 0xd8 header of frame-2 are
-              // lost on the RS485 bus, so buf[9] ends up being the ID byte of
-              // frame-2 instead of the checksum.  Detect this by checking that
-              // buf[9] == buf[1] (same motor ID) and that position is in range.
-              if (buf[9] == buf[1] && buf[1] >= 1 && buf[1] <= 8 && buf[7] <= 100) {
-                ESP_LOGD("awning_rx", "Frame recovered (boundary loss) motor=%d", buf[1]);
-              } else {
-                ESP_LOGW("awning_rx", "CRC error: calc=0x%02X recv=0x%02X", chk, buf[9]);
-                continue;
-              }
-            }
-            uint8_t mid     = buf[1];
-            uint8_t raw_pos = buf[7];
-            uint8_t zone    = buf[8];
-            bool    running = (zone & 0x01) != 0;
-            // ESPHome: 1.0 = open, 0.0 = closed
-            // raw_pos: 0 = fully open, 100 = fully closed
-            float esp_pos = 1.0f - (raw_pos / 100.0f);
-            if (esp_pos < 0.0f) esp_pos = 0.0f;
-            if (esp_pos > 1.0f) esp_pos = 1.0f;
-            ESP_LOGI("awning_rx", "Motor %d  pos=%d%%  zone=0x%02X  running=%d",
-                     mid, raw_pos, zone, (int)running);
-            // Store frame data for rx_dispatch (script called below after loop)
-            id(rx_mid)      = mid;
-            id(rx_esp_pos)  = esp_pos;
-            id(rx_running)  = running;
-          }
-      - if:
-          condition:
-            lambda: 'return id(rx_mid) != 0;'
-          then:
-            - script.execute: rx_dispatch
-
-  # ── Periodic poll trigger ─────────────────────────────────────────────────
-  - interval: ${poll_interval}
-    then:
-      - script.execute: poll_motors
-
-# ---------------------------------------------------------------------------
-# Poll script – queries all motors sequentially, 1 s apart.
-# Each motor package extends this script via !extend poll_motors, appending
-# its own availability check, query lambda, and 1 s delay.  Adding or
-# removing a motor package automatically changes the poll sequence with no
-# edits needed here.
-# ---------------------------------------------------------------------------
-script:
-  - id: poll_motors
-    mode: single
-    then:
-      # ── Per-motor availability checks + query lambdas ─────────────────────
-      # Fully appended by motor packages via !extend poll_motors.
-      - delay: 1ms
-
-  - id: rx_dispatch
-    mode: single
-    then:
-      # ── Per-motor dispatch branches ───────────────────────────────────────
-      # Fully appended by motor packages via !extend rx_dispatch.
-      # Each branch guards with: if (id(rx_mid) != N) return;
-      - delay: 1ms
+uartex:
+  uart_id: rs485_bus
+  rx_header: [0xd8]
+  tx_header: [0x9a]
+  rx_length: 10             # total frame = 1 header + 8 payload + 1 checksum
+  rx_timeout: 50ms
+  rx_checksum: xor_no_header
+  tx_checksum: xor_no_header
+  tx_delay: 1500ms          # inter-command gap; gives each motor time to respond
 
 # ---------------------------------------------------------------------------
 # Manual hex-command text entity
 #
-# In Home Assistant, write exactly 6 space-separated hex bytes (WITHOUT the
-# verify byte) to this entity to send an arbitrary RS485 frame.
-# The verify byte is calculated and appended automatically.
+# In Home Assistant, write exactly 6 space-separated hex bytes to this entity
+# to send an arbitrary RS485 frame.  The header (0x9a) and verify byte are
+# handled automatically by the uartex hub.
+#
+# Input format:  9a  ID  CL  CH  Cmd1  Cmd2
+#   (the leading 9a is accepted and stripped; uartex re-adds it as tx_header)
 #
 # Frame layout:
-#   Byte 0: 9a              ← always the frame head
+#   Byte 0: 9a              ← always the frame head  (stripped, auto-added)
 #   Byte 1: ID              ← 01–08 individual,  00 = group broadcast
 #   Byte 2: ChanL           ← low channel byte
 #   Byte 3: ChanH           ← high channel byte
@@ -311,27 +217,27 @@ text:
     max_length: 50
     on_value:
       then:
-        - lambda: |-
-            const char *s = x.c_str();
-            std::vector<uint8_t> frame;
-            while (*s) {
-              while (*s == ' ') s++;
-              if (!*s) break;
-              char *end;
-              long val = strtol(s, &end, 16);
-              if (end == s) break;
-              frame.push_back((uint8_t)val);
-              s = end;
-            }
-            if (frame.size() == 6) {
-              uint8_t v = frame[1]^frame[2]^frame[3]^frame[4]^frame[5];
-              frame.push_back(v);
-              id(rs485_bus).write_array(frame.data(), frame.size());
-              ESP_LOGI("awning", "TX: %02X %02X %02X %02X %02X %02X %02X",
-                frame[0], frame[1], frame[2], frame[3], frame[4], frame[5], frame[6]);
-            } else {
-              ESP_LOGW("awning", "Expected 6 bytes, got %d – command ignored", (int)frame.size());
-            }
+        - uartex.write:
+            data: !lambda |-
+              const char *s = x.c_str();
+              std::vector<uint8_t> frame;
+              while (*s) {
+                while (*s == ' ') s++;
+                if (!*s) break;
+                char *end;
+                long val = strtol(s, &end, 16);
+                if (end == s) break;
+                frame.push_back((uint8_t)val);
+                s = end;
+              }
+              // Strip the leading 0x9a header byte – uartex adds it automatically.
+              if (!frame.empty() && frame[0] == 0x9a) frame.erase(frame.begin());
+              if (frame.size() != 5) {
+                ESP_LOGW("awning", "Expected 5 payload bytes (or 6 with 9a), got %d",
+                         (int)frame.size());
+                return {};
+              }
+              return frame;
 # ---------------------------------------------------------------------------
 # Per-motor covers (awning_1 … awning_N), per-channel group covers, and
 # the all-awnings broadcast cover all come from the packages block above.

@@ -1,53 +1,49 @@
 # ===========================================================================
-# packages/group.yaml  –  channel-group cover package template
+# packages/group.yaml  –  channel-group cover package template (uartex platform)
 #
 # Included once per group by awning-motor.yaml via:
 #
 #   packages:
-#     group_1:
+#     group_all:
 #       !include
 #         file: packages/group.yaml
 #         vars:
-#           group_name: "Awnings Group 1"
-#           group_id: awning_group1
-#           channel_l: "0x01"
+#           group_name: "All Awnings"
+#           group_id: awning_all
+#           channel_l: "0x00"
 #           channel_h: "0x00"
 #
 # Provides:
-#   • cover:  ${group_id}  (broadcasts to ID=0 filtered by channel)
+#   • cover:  ${group_id}  (broadcasts to all motors on the given channel)
+#
+# Note: channel-filtered group broadcasts (ID=0 with non-zero channel bytes)
+# do not work – motors respond to any ID=0 broadcast regardless of channel.
+# Use channel_l=0x00, channel_h=0x00 for an all-motors broadcast.
 # ===========================================================================
 
 defaults:
-  group_name: "Awnings Group 1"
-  group_id: awning_group1
+  group_name: "Awnings Group"
+  group_id: awning_group
   channel_l: "0x00"
   channel_h: "0x00"
 
 cover:
-  - platform: template
+  - platform: uartex
     name: "${group_name}"
     id: ${group_id}
     device_class: awning
     optimistic: true
-    has_position: true
-    open_action:
-      - lambda: |-
-          const uint8_t m=0,cL=${channel_l},cH=${channel_h},c1=0x0a,c2=0xdd;
-          uint8_t f[]={0x9a,m,cL,cH,c1,c2,(uint8_t)(m^cL^cH^c1^c2)};
-          id(rs485_bus).write_array(f,7);
-    close_action:
-      - lambda: |-
-          const uint8_t m=0,cL=${channel_l},cH=${channel_h},c1=0x0a,c2=0xee;
-          uint8_t f[]={0x9a,m,cL,cH,c1,c2,(uint8_t)(m^cL^cH^c1^c2)};
-          id(rs485_bus).write_array(f,7);
-    stop_action:
-      - lambda: |-
-          const uint8_t m=0,cL=${channel_l},cH=${channel_h},c1=0x0a,c2=0xcc;
-          uint8_t f[]={0x9a,m,cL,cH,c1,c2,(uint8_t)(m^cL^cH^c1^c2)};
-          id(rs485_bus).write_array(f,7);
-    position_action:
-      - lambda: |-
-          const uint8_t m=0,cL=${channel_l},cH=${channel_h};
-          uint8_t pct=(uint8_t)((1.0f-pos)*100.0f+0.5f);
-          uint8_t f[]={0x9a,m,cL,cH,0xdd,pct,(uint8_t)(m^cL^cH^0xdd^pct)};
-          id(rs485_bus).write_array(f,7);
+    # Group broadcasts use motor ID = 0x00.
+    # No state filter or state_position: the group cover does not track position
+    # (individual motor covers handle position feedback).
+    #
+    # TX payload bytes (uartex auto-prepends 0x9a header, appends XOR checksum):
+    command_open: !lambda |-
+      return {{0x00, ${channel_l}, ${channel_h}, 0x0a, 0xdd}};
+    command_close: !lambda |-
+      return {{0x00, ${channel_l}, ${channel_h}, 0x0a, 0xee}};
+    command_stop: !lambda |-
+      return {{0x00, ${channel_l}, ${channel_h}, 0x0a, 0xcc}};
+    command_position: !lambda |-
+      uint8_t pct = (uint8_t)((1.0f - x) * 100.0f + 0.5f);
+      return {{0x00, ${channel_l}, ${channel_h}, 0xdd, pct}, {}};

@@ -1,5 +1,5 @@
 # ===========================================================================
-# packages/motor.yaml  –  per-motor package template
+# packages/motor.yaml  –  per-motor package template (uartex platform)
 #
 # Included once per motor by awning-motor.yaml via:
 #
@@ -14,87 +14,54 @@
 #           channel_h: "0x00"
 #
 # Provides:
-#   • globals:        motor_last_seen_${motor_id}
-#   • binary_sensor:  awning_${motor_id}_online
-#   • cover:          awning_${motor_id}
-#   • script !extend: poll_motors  (appends query lambda + 1 s delay)
+#   • cover:  awning_${motor_id}  (uartex platform, full state + command support)
+#
+# The uartex hub (defined in the main file) dispatches incoming RX frames to
+# each cover entity via the motor-ID state filter.  Polling is handled by
+# command_update fired at update_interval (inherited from poll_interval).
 # ===========================================================================
 
 defaults:
-  motor_id: "1"
+  motor_id: 1
   motor_name: "Awning 1"
   channel_l: "0x01"
   channel_h: "0x00"
-  offline_timeout_ms: "90000"
-
-globals:
-  - id: motor_last_seen_${motor_id}
-    type: uint32_t
-    restore_value: false
-    initial_value: '0'
-
-binary_sensor:
-  - platform: template
-    name: "${motor_name} Online"
-    id: awning_${motor_id}_online
-    device_class: connectivity
+  poll_interval: 30s    # fallback; normally inherited from the main file
 
 cover:
-  - platform: template
+  - platform: uartex
     name: "${motor_name}"
     id: awning_${motor_id}
     device_class: awning
     optimistic: true
-    has_position: true
-    open_action:
-      - lambda: |-
-          const uint8_t m=${motor_id},cL=${channel_l},cH=${channel_h},c1=0x0a,c2=0xdd;
-          uint8_t f[]={0x9a,m,cL,cH,c1,c2,(uint8_t)(m^cL^cH^c1^c2)};
-          id(rs485_bus).write_array(f,7);
-    close_action:
-      - lambda: |-
-          const uint8_t m=${motor_id},cL=${channel_l},cH=${channel_h},c1=0x0a,c2=0xee;
-          uint8_t f[]={0x9a,m,cL,cH,c1,c2,(uint8_t)(m^cL^cH^c1^c2)};
-          id(rs485_bus).write_array(f,7);
-    stop_action:
-      - lambda: |-
-          const uint8_t m=${motor_id},cL=${channel_l},cH=${channel_h},c1=0x0a,c2=0xcc;
-          uint8_t f[]={0x9a,m,cL,cH,c1,c2,(uint8_t)(m^cL^cH^c1^c2)};
-          id(rs485_bus).write_array(f,7);
-    position_action:
-      - lambda: |-
-          const uint8_t m=${motor_id},cL=${channel_l},cH=${channel_h};
-          uint8_t pct=(uint8_t)((1.0f-pos)*100.0f+0.5f);
-          uint8_t f[]={0x9a,m,cL,cH,0xdd,pct,(uint8_t)(m^cL^cH^0xdd^pct)};
-          id(rs485_bus).write_array(f,7);
-
-# Extend rx_dispatch: update this motor's state when the parsed frame ID matches.
-
-# Extend the poll_motors script defined in the main file with:
-#   1. Availability timeout check for this motor
-#   2. Status-query frame
-#   3. 1 s inter-motor gap
-script:
-  - id: !extend rx_dispatch
-    then:
-      - lambda: |-
-          if (id(rx_mid) != ${motor_id}) return;
-          id(motor_last_seen_${motor_id}) = millis();
-          id(awning_${motor_id}_online).publish_state(true);
-          id(awning_${motor_id}).position = id(rx_esp_pos);
-          id(awning_${motor_id}).current_operation = id(rx_running)
-            ? cover::COVER_OPERATION_OPENING : cover::COVER_OPERATION_IDLE;
-          id(awning_${motor_id}).publish_state();
-  - id: !extend poll_motors
-    then:
-      - lambda: |-
-          const uint32_t TIMEOUT_MS = ${offline_timeout_ms};
-          uint32_t now = millis();
-          id(awning_${motor_id}_online).publish_state(
-            id(motor_last_seen_${motor_id}) != 0 &&
-            (uint32_t)(now - id(motor_last_seen_${motor_id})) < TIMEOUT_MS);
-      - lambda: |-
-          const uint8_t m=${motor_id}, cL=${channel_l}, cH=${channel_h}, c1=0xcc, c2=0x00;
-          uint8_t f[]={0x9a,m,cL,cH,c1,c2,(uint8_t)(m^cL^cH^c1^c2)};
-          id(rs485_bus).write_array(f,7);
-      - delay: 1000ms
+    #
+    # RX frame payload bytes (after 0xd8 header, before XOR checksum):
+    #   [0] motor ID   [1] ChanL   [2] ChanH
+    #   [3-5] (unused) [6] pos 0–100 (0=open)   [7] zone (bit 0 = moving)
+    #
+    # State filter: only process frames whose first byte equals this motor's ID.
+    state:
+      offset: 0
+      data:
+        - ${motor_id}
+      match: prefix
+    # Position mapping: raw 0 (open)→100 (closed)  ↔  ESPHome 1.0 (open)→0.0 (closed)
+    state_position: !lambda |-
+      ESP_LOGI("awning_rx", "Motor ${motor_id}  pos=%d%%  running=%d",
+               data[6], data[7] & 0x01);
+      return 1.0f - (data[6] / 100.0f);
+    #
+    # TX payload bytes (uartex auto-prepends 0x9a header, appends XOR checksum):
+    #
+    command_open: !lambda |-
+      return {{(uint8_t)${motor_id}, ${channel_l}, ${channel_h}, 0x0a, 0xdd}};
+    command_close: !lambda |-
+      return {{(uint8_t)${motor_id}, ${channel_l}, ${channel_h}, 0x0a, 0xee}};
+    command_stop: !lambda |-
+      return {{(uint8_t)${motor_id}, ${channel_l}, ${channel_h}, 0x0a, 0xcc}};
+    command_position: !lambda |-
+      uint8_t pct = (uint8_t)((1.0f - x) * 100.0f + 0.5f);
+      return {{(uint8_t)${motor_id}, ${channel_l}, ${channel_h}, 0xdd, pct}, {}};
+    command_update: !lambda |-
+      return {{(uint8_t)${motor_id}, ${channel_l}, ${channel_h}, 0xcc, 0x00}};
+    update_interval: ${poll_interval}

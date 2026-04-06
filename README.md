@@ -313,3 +313,4 @@ All `motor_id` values must match the ID programmed into the physical motor hardw
 
 - **Protocol reference**: [Loxone Library — Electric Curtain Drive A-OK](https://library.loxone.com/detail/electric-curtain-drive-a-ok-1922/overview) — community documentation of the AOK-E AM68 RS485 protocol that helped confirm the frame structure.
 - **ESPHome** — open-source firmware framework ([Apache 2.0](https://github.com/esphome/esphome/blob/dev/LICENSE)). All UART, cover, and template components used here are part of the mainline ESPHome project.
+- **uartex** by [eigger](https://github.com/eigger) — ESPHome external component that provides declarative RS485 frame parsing and command dispatch ([MIT License](https://github.com/eigger/espcomponents/blob/master/LICENSE), [source](https://github.com/eigger/espcomponents)).
