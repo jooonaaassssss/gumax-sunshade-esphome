@@ -1,0 +1,9 @@
+# ESPHome build artefacts
+.esphome/
+
+# Secrets file – never commit this
+esphome/secrets.yaml
+
+# OS
+.DS_Store
+Thumbs.db
