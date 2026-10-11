@@ -1,5 +1,6 @@
 # ===========================================================================
 # gumax-sunshade-esphome  –  AOK-E AM68 / Gumax RS485 awning motor controller
+# Angepasst für: Waveshare ESP32-S3-RS485-CAN (isoliertes RS485, SP3485)
 #
 # USER CONFIGURATION: edit the substitutions block and the packages block
 # to match your motor IDs, names, and channel assignments.
@@ -7,7 +8,6 @@
 #
 # See README for full wiring instructions and protocol reference.
 # ===========================================================================
-
 external_components:
   - source: github://eigger/espcomponents@latest
     components: [ uartex ]
@@ -17,9 +17,10 @@ substitutions:
   device_name: awning-motor
   friendly_name: Awning Motor Controller
 
-  # ── UART pins ─────────────────────────────────────────────────────────────
-  uart_rx_pin: GPIO16
+  # ── UART pins (Waveshare ESP32-S3-RS485-CAN) ─────────────────────────────
+  uart_rx_pin: GPIO18
   uart_tx_pin: GPIO17
+  uart_flow_control_pin: GPIO21   # DE/RE des SP3485 (Senderichtung)
 
   # ── Polling ───────────────────────────────────────────────────────────────
   poll_interval: 30s        # How often to query all motors for status
@@ -90,31 +91,6 @@ packages:
         motor_name: "Awning 5"
         channel_l: ${group2_channel_l}
         channel_h: ${group2_channel_h}
-  motor_6:
-    !include
-      file: packages/motor.yaml
-      vars:
-        motor_id: 6
-        motor_name: "Awning 6"
-        channel_l: ${group2_channel_l}
-        channel_h: ${group2_channel_h}
-  motor_7:
-    !include
-      file: packages/motor.yaml
-      vars:
-        motor_id: 7
-        motor_name: "Awning 7"
-        channel_l: ${group2_channel_l}
-        channel_h: ${group2_channel_h}
-  motor_8:
-    !include
-      file: packages/motor.yaml
-      vars:
-        motor_id: 8
-        motor_name: "Awning 8"
-        channel_l: ${group2_channel_l}
-        channel_h: ${group2_channel_h}
-
   # ── All-awnings broadcast (ID=0, ChanL=0, ChanH=0) ──────────────────────
   # Note: channel-filtered group broadcast (ID=0 with non-zero channel bytes)
   # does not work – motors respond to any ID=0 broadcast regardless of channel.
@@ -133,13 +109,15 @@ esphome:
   friendly_name: ${friendly_name}
 
 esp32:
-  board: esp32dev
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 16MB
   framework:
     type: esp-idf
 
 logger:
   level: DEBUG
-  baud_rate: 0           # Disables log on UART0 – keeps GPIO1/3 free
+  hardware_uart: USB_SERIAL_JTAG   # Log über USB-C (native USB des S3)
 
 api:
   encryption:
@@ -155,11 +133,13 @@ wifi:
 
 # ---------------------------------------------------------------------------
 # RS485 UART  –  2400 baud 8N1  (matches motor specification)
+# Waveshare-Board: Senderichtung wird über GPIO21 (flow_control_pin) gesteuert
 # ---------------------------------------------------------------------------
 uart:
   id: rs485_bus
   rx_pin: ${uart_rx_pin}
   tx_pin: ${uart_tx_pin}
+  flow_control_pin: ${uart_flow_control_pin}
   baud_rate: 2400
 
 # ---------------------------------------------------------------------------
@@ -238,6 +218,7 @@ text:
                 return {};
               }
               return frame;
+
 # ---------------------------------------------------------------------------
 # Per-motor covers (awning_1 … awning_N), per-channel group covers, and
 # the all-awnings broadcast cover all come from the packages block above.

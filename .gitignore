@@ -7,3 +7,5 @@ esphome/secrets.yaml
 # OS
 .DS_Store
 Thumbs.db
+secrets.yaml
+.esphome/
