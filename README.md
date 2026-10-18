@@ -2,6 +2,11 @@
 
 Control AOK-E AM68 / Gumax-compatible RS485 tubular awning motors from [ESPHome](https://esphome.io) and Home Assistant — no proprietary hub required.
 
+This is a modified fork of [s3bi77/gumax-sunshade-esphome](https://github.com/s3bi77/gumax-sunshade-esphome),
+configured for a Waveshare ESP32-S3-RS485-CAN and five motors. It is released
+under the same licence, the MIT License. See [Fork history](#fork-history),
+[Changes in this fork](#changes-in-this-fork) and [Licence](#licence).
+
 > ⚠️ **SAFETY WARNING — READ BEFORE PROCEEDING**
 >
 > Tubular awning motors are mains-powered (typically 230 V AC). **Always disconnect mains power before opening the motor end cap, accessing the PCB, or soldering wires.** Failure to do so can result in **electric shock, serious injury, or death**. The low-voltage RS485 and signal wires are not isolated from the mains supply inside the motor housing. Proceed at your own risk.
@@ -10,15 +15,15 @@ Control AOK-E AM68 / Gumax-compatible RS485 tubular awning motors from [ESPHome]
 
 ---
 
-## What you get
+## Features
 
-- Individual open/close/stop and **position control** (0–100 %) for up to 8 motors
-- Real-time **position feedback** read from the motor's own status frames
-- Per-motor **online / offline detection** in Home Assistant
+- Individual open/close/stop and **position control** (0–100 %) per motor
+- **Position feedback** read from the motor's own status frames, polled every 30 s
 - **All-awnings broadcast** cover — open/close/stop/position all motors with one command
-- **RS485 Raw Command** text entity for ad-hoc hex frame injection (useful for debugging or one-off firmware commands)
-- Status-query buttons for individual motors and broadcast
-- Single ESPHome YAML — no custom components, no extra libraries
+- **RS485 Raw Command** text entity to send any frame from Home Assistant (motor addressing, debugging)
+- Every received RS485 frame is logged at `DEBUG` level
+- Plain ESPHome YAML on top of the [uartex](https://github.com/eigger/espcomponents) external component
+- [tools/esp_probe.py](tools/esp_probe.py) — send frames and watch the bus from a PC, without Home Assistant
 
 ---
 
@@ -35,18 +40,56 @@ The Gumax motors are physically identical to AOK-E AM68. The only difference is 
 
 ---
 
-## Prerequisites
+## Requirements
 
 **Hardware**
-- ESP32 development board (e.g. ESP32-DevKitC), or any ESP32/ESP8266 with a spare UART
-- TTL-to-RS485 converter module. Use one with **automatic TX/RX direction switching** (these are labeled "auto", "flow control", or have a hardware DE/RE jumper). A bare MAX485 module requires a separate GPIO to drive DE/RE, which is not shown here.
+- [Waveshare ESP32-S3-RS485-CAN](https://www.waveshare.com/wiki/ESP32-S3-RS485-CAN) — the board this fork is configured and tested for. Any other ESP32 with an RS485 transceiver works with adjusted pins, see [Other boards](#5-other-boards).
 - RJ12 (6P6C) patch cables and a crimping tool, or pre-made cables
 
 **Software**
-- [ESPHome](https://esphome.io/guides/installing_esphome) ≥ 2024.x
+- [ESPHome](https://esphome.io/guides/installing_esphome) 2026.9 (tested with 2026.9.1). The uartex component is pinned to tag `v260904` in [esphome/awning-motor.yaml](esphome/awning-motor.yaml); update ESPHome and uartex together.
 - Home Assistant (optional but recommended for the cover UI)
+- Python 3 with [aioesphomeapi](https://pypi.org/project/aioesphomeapi/), only for [tools/esp_probe.py](tools/esp_probe.py)
 
-**Estimated parts cost**: < €30 for ESP32 + converter + cables
+---
+
+## Installation
+
+1. Create the secrets file and fill in Wi-Fi credentials, API key and OTA password:
+   ```bash
+   cp esphome/secrets.yaml.example esphome/secrets.yaml
+   ```
+2. Adjust the `substitutions:` and `packages:` blocks in [esphome/awning-motor.yaml](esphome/awning-motor.yaml) to your board, motor IDs, names and channels (see [ESPHome configuration](#esphome-configuration)).
+3. Flash. The first time over USB-C, afterwards over Wi-Fi (OTA):
+   ```bash
+   esphome run esphome/awning-motor.yaml
+   ```
+   With the ESPHome Device Builder in Home Assistant instead, copy `awning-motor.yaml` and the `packages/` folder to `/config/esphome/` and add the four keys to the Device Builder's own `secrets.yaml`.
+4. Add the discovered device in Home Assistant and enter the API key.
+5. Give every motor its ID, once per motor: [Addressing motors](#addressing-motors-programming-ids-and-channels).
+
+---
+
+## This installation
+
+The configuration in this repository is the one running on the author's pergola.
+It is committed as-is, so it doubles as a worked example. Only the credentials
+are kept out of Git (`esphome/secrets.yaml` is ignored).
+
+| Motor | ESPHome id | Motor ID | Channel | ChanL / ChanH |
+|---|---|---|---|---|
+| 1 | `awning_1` | `0x01` | 1 | `01 00` |
+| 2 | `awning_2` | `0x02` | 1 | `01 00` |
+| 3 | `awning_3` | `0x03` | 1 | `01 00` |
+| 4 | `awning_4` | `0x04` | 1 | `01 00` |
+| 5 | `awning_5` | `0x05` | 2 | `02 00` |
+
+Controller: Waveshare ESP32-S3-RS485-CAN, UART RX GPIO18, TX GPIO17, driver
+enable GPIO21, hostname `awning-motor`.
+
+The IDs were programmed one motor at a time with [tools/esp_probe.py](tools/esp_probe.py)
+and each one verified by a status query. A motor that is factory-reset forgets
+its ID and has to be programmed again.
 
 ---
 
@@ -82,26 +125,46 @@ Motor 1 ──RJ12── Motor 2 ──RJ12── Motor 3 ──RJ12── … �
 
 Connect the converter to either the first or last motor in the chain. Terminate long runs (> 10 m) with a 120 Ω resistor across A and B. (Some TTL converters already have that resistor soldered on)
 
-### 4. RS485 converter to ESP32 wiring
+### 4. Waveshare ESP32-S3-RS485-CAN
+
+The board has an isolated RS485 transceiver on board; the UART pins are fixed by
+the board and already set in the YAML:
+
+| Signal | ESP32-S3 pin | Substitution |
+|---|---|---|
+| RX | GPIO18 | `uart_rx_pin` |
+| TX | GPIO17 | `uart_tx_pin` |
+| Driver enable (DE/RE) | GPIO21 | `uart_flow_control_pin` |
+
+Connect the board's RS485 **A** terminal to motor pin 1 and **B** to motor pin 6.
+If the terminal block has an RS485 ground, connect it to motor pin 5.
+
+- Power the board either from its terminal block or from USB-C, never from both at the same time (Waveshare FAQ).
+- If communication is unreliable, move the board's termination jumper to **120R**.
+- Logs are available on the USB-C port (`USB_SERIAL_JTAG`) and over Wi-Fi.
+
+### 5. Other boards
+
+Any ESP32 with a TTL-to-RS485 converter works. Change the `esp32:` block to your
+board and set the pins in `substitutions:`.
 
 | Converter pin | ESP32 pin | Notes |
 |---|---|---|
 | A (or D+) | — | Connect to motor RS485-A |
 | B (or D−) | — | Connect to motor RS485-B |
 | GND | GND | Must share ground with motors |
-| RO (RX out) | GPIO16 (RX) | Crossed — converter RO → ESP32 RX |
-| DI (TX in) | GPIO17 (TX) | Crossed — converter DI ← ESP32 TX |
+| RO (RX out) | e.g. GPIO16 → `uart_rx_pin` | Converter RO → ESP32 RX |
+| DI (TX in) | e.g. GPIO17 → `uart_tx_pin` | Converter DI ← ESP32 TX |
+| DE + RE | any GPIO → `uart_flow_control_pin` | Only for converters without automatic direction switching |
 | VCC | 3.3 V or 5 V | Check converter datasheet |
 
-> **DE/RE**: If your converter exposes separate DE and RE pins, check whether they are already tied together on the board. For auto-direction modules they are internally controlled. For manual modules, tie DE+RE together and connect to a GPIO, then add `direction_pin:` to the `uart:` block in the YAML.
-
-GPIO assignment can be changed in the `substitutions:` block.
+> **DE/RE**: Converters labelled "auto" or "flow control" switch direction by themselves; remove the `flow_control_pin:` line from the `uart:` block for those. A bare MAX485 module needs DE and RE tied together and driven by a GPIO through `flow_control_pin`.
 
 ---
 
 ## Addressing motors (programming IDs and channels)
 
-Each motor must be programmed with a unique **ID** (0x01–0xFF in hex) and a **channel** (bitmask). Do this before connecting multiple motors to the bus — only one motor should be connected at a time during programming.
+Each motor must be programmed with a unique **ID** (0x01–0xFF in hex) and a **channel** (bitmask). A motor that has never been programmed, or has been factory-reset, answers as ID `0x00`. Program one motor at a time: **only the motor being programmed may be connected to the bus**, otherwise every connected motor takes the new ID.
 
 **Programming frame:**
 
@@ -139,18 +202,30 @@ Each motor must be programmed with a unique **ID** (0x01–0xFF in hex) and a **
           (VFY = 01 ^ 01 ^ 00 = 00)
 ```
 
-**Worked walk-through for an 8-motor pergola installation:**
-1. Daisychain all motors together
-2. Start with the motor furthes away from your ESP. Only have power connected to the closest Motor to the ESP (So the esp gets its 5V supply) and the one that you are starting to pair with.
-2. Use the **RS485 Raw Command** entity in Home Assistant and send: `9a 01 01 00 aa aa` (ID=1, Channel=1)
-   (verify byte is appended automatically).
-3. The motor acknowledges by blinking blue tree times. Disconnect power, connect motor 2. Keep the Motor powering the esp connected
-4. Send `9a 02 01 00 aa aa` (ID=2, same channel 1). Repeat for motors 3 and 4.
-5. For a second group on channel 2, send `9a 05 02 00 aa aa` through `9a 08 02 00 aa aa`.
-6. Now program the motor powering your ESP to ensure it also has a correct address (it should have jumped through ids along with the other motors while programming).
-7. Connect all motors to power and ensure all of them are controllable individually.
+**Procedure** (used for [this installation](#this-installation)):
 
-> **IDs are hex**: motor 9 is `0x09`, motor 10 is `0x0A`, not `10`. For 8-motor setups (IDs 1–8) this distinction doesn't matter.
+Send the frames below either through the **RS485 Raw Command** entity in Home
+Assistant (and watch the ESPHome log) or with [tools/esp_probe.py](tools/esp_probe.py).
+The checksum is appended automatically.
+
+1. Connect **only** the motor to be programmed to the bus.
+2. Check the bus: send `9a 00 00 00 cc 00`. Every connected motor answers with its
+   own ID, so exactly one reply `D8 00 00 00 …` must come back. A reply with another
+   ID means an already programmed motor is still connected.
+3. Program it, e.g. ID 2 on channel 1: `9a 02 01 00 aa aa`.
+4. Verify: `9a 02 01 00 cc 00` must be answered with `D8 02 01 00 …`.
+5. Disconnect the motor, connect the next one, continue with step 2.
+
+With esp_probe.py, steps 2–4 for motor 2 are:
+
+```bash
+python tools/esp_probe.py "9a 00 00 00 cc 00"
+python tools/esp_probe.py "9a 02 01 00 aa aa" "9a 02 01 00 cc 00"
+```
+
+> **Upstream walk-through** (8 motors, ESP powered from the 5 V tap of the nearest motor): daisy-chain all motors, but power only the motor feeding the ESP and the one being programmed. Program from the far end; the motor acknowledges by blinking blue three times. Program the motor feeding the ESP last — it has received every programming frame along the way.
+
+> **IDs are hex**: motor 9 is `0x09`, motor 10 is `0x0A`, not `10`. For setups with up to 9 motors this distinction doesn't matter.
 
 > **Channels are for addressing only**: the channel bytes in a broadcast frame (ID=0x00) are ignored — all motors respond regardless of their programmed channel. Channels serve purely as an identifier during the ID-programming step and for per-motor individual commands.
 
@@ -168,7 +243,7 @@ All multi-byte values are big-endian. Baud rate: **2400 8N1**.
 | 1 | `ID` | Motor ID (0x00 = group broadcast — channel bytes are ignored for broadcast) |
 | 2 | `CH_L` | Channel low byte |
 | 3 | `CH_H` | Channel high byte |
-| 4 | `Cmd1` | `0x0A` = motion command, `0xDD` = position command |
+| 4 | `Cmd1` | `0x0A` = motion, `0xDD` = position, `0xCC` = status query, `0xAA` = programming |
 | 5 | `Cmd2` | See table below |
 | 6 | `VFY` | `ID ^ CH_L ^ CH_H ^ Cmd1 ^ Cmd2` |
 
@@ -181,29 +256,37 @@ All multi-byte values are big-endian. Baud rate: **2400 8N1**.
 | `0x0A` | `0xEE` | Move DOWN (close) |
 | `0xCC` | `0x00` | Status query (motor replies with a response frame) |
 | `0xDD` | `0x00`–`0x64` | Go to absolute position (0=open, 100=closed) |
+| `0xAA` | `0xAA` | Program ID and channel (see [Addressing motors](#addressing-motors-programming-ids-and-channels)) |
 
 ### Response frame (motor → ESP32, 10 bytes)
 
-The motor sends this frame **twice** in quick succession after each status query. The firmware handles occasional byte loss at the frame boundary.
+The motor usually sends this frame **twice** in quick succession after each status query. While a motor is running it has been observed not to answer status queries at all.
 
 | Byte | Meaning |
 |------|---------|
 | 0 | `0xD8` — response header |
-| 1 | Motor ID |
-| 2–6 | Motor-specific data (voltage, speed, …) |
+| 1 | Motor ID (`0x00` = not programmed) |
+| 2 | Channel low byte |
+| 3 | Channel high byte |
+| 4–6 | Unknown. Byte 5 appears to be the supply voltage in volts (`0x17`/`0x18` observed) |
 | 7 | Position: 0–100 |
 | 8 | Zone flags: bit 0 = motor running |
 | 9 | Checksum: XOR of bytes 1–8 |
 
+Example: `D8 02 01 00 00 18 00 00 00 1B` — motor 2, channel 1, position 0, idle.
+
 ### Position conventions
 
-The motor's raw position value runs in opposite directions depending on how the motor was physically installed:
+Raw position 0 is open and 100 is closed. ESPHome uses `0.0 = closed` and
+`1.0 = open`, so the covers report `1 – (raw / 100)`.
 
-| Group | Raw 0 means | Raw 100 means | ESPHome `position` |
-|-------|-------------|---------------|-------------------|
-| All motors | Open | Closed | `1 – (raw / 100)` |
+### End limits
 
-ESPHome convention: `0.0 = closed`, `1.0 = open`.
+Position feedback needs the motor's end limits to be set (see the motor's manual
+for the procedure with its remote). On motors without limits, observed on this
+installation before mounting, the position stays at 0 and the running flag at 0
+even after a move. Whether feedback works once the limits are set is still to be
+confirmed.
 
 ---
 
@@ -213,20 +296,24 @@ ESPHome convention: `0.0 = closed`, `1.0 = open`.
 
 ```
 esphome/
-├── awning-motor.yaml          # main file — edit substitutions + packages here
+├── awning-motor.yaml          # main file — board, substitutions, motor list
 ├── packages/
-│   ├── motor.yaml             # template: global + binary_sensor + cover per motor
-│   └── group.yaml             # template: group broadcast cover
-└── secrets.yaml               # copy from secrets.yaml.example and fill in
+│   ├── motor.yaml             # template: one cover per motor
+│   └── group.yaml             # template: all-awnings broadcast cover
+├── secrets.yaml.example       # template for secrets.yaml
+└── secrets.yaml               # your credentials (git-ignored)
+tools/
+├── esp_probe.py               # send frames / watch the bus over the native API
+└── requirements.txt
 ```
 
-### Quick start
+### Entities
 
-```bash
-cp esphome/secrets.yaml.example esphome/secrets.yaml
-# Edit secrets.yaml with your Wi-Fi and API credentials
-esphome run esphome/awning-motor.yaml
-```
+| Entity | Source | Purpose |
+|---|---|---|
+| One cover per motor (`awning_N`) | `packages/motor.yaml` | Open/close/stop/position, position feedback |
+| `All Awnings` cover | `packages/group.yaml` | Broadcast to every motor (no feedback) |
+| `RS485 Raw Command` text | `awning-motor.yaml` | Send any frame, e.g. for addressing |
 
 ### Step 1 — Substitutions
 
@@ -237,21 +324,21 @@ substitutions:
   device_name: awning-motor        # ESPHome device hostname
   friendly_name: Awning Motor Controller
 
-  uart_rx_pin: GPIO16              # Connect to converter RO
-  uart_tx_pin: GPIO17              # Connect to converter DI
+  uart_rx_pin: GPIO18
+  uart_tx_pin: GPIO17
+  uart_flow_control_pin: GPIO21    # RS485 driver enable (DE/RE)
 
-  poll_interval: 30s               # How often to poll all motors
-  offline_timeout_ms: "90000"      # Mark offline after 3 missed cycles
+  poll_interval: 30s               # How often to query each motor
 
-  group1_channel_l: "0x01"        # ChanL byte for group 1 motors
+  group1_channel_l: "0x01"         # ChanL byte for group 1 motors
   group1_channel_h: "0x00"
-  group2_channel_l: "0x02"        # ChanL byte for group 2 motors
+  group2_channel_l: "0x02"         # ChanL byte for group 2 motors
   group2_channel_h: "0x00"
 ```
 
 ### Step 2 — Motor package includes
 
-Each motor is declared as one `packages:` entry. Copy/remove blocks to match your motor count:
+Each motor is declared as one `packages:` entry. All four vars are required:
 
 ```yaml
 packages:
@@ -259,18 +346,18 @@ packages:
     !include
       file: packages/motor.yaml
       vars:
-        motor_id: "1"            # Hardware motor ID (1–255)
+        motor_id: 1              # Hardware motor ID (1–255)
         motor_name: "Awning 1"   # Name shown in Home Assistant
         channel_l: ${group1_channel_l}
         channel_h: ${group1_channel_h}
-        offline_timeout_ms: ${offline_timeout_ms}
 ```
 
-Each entry generates: one `motor_last_seen_N` global, one `awning_N_online` binary sensor, and one `awning_N` cover.
+Each entry generates one `awning_N` cover. It polls its motor every
+`poll_interval` and only accepts response frames that carry its `motor_id`.
 
 ### Step 3 — All-awnings broadcast cover
 
-A single `group_all` package entry is included by default and covers all motors at once:
+A single `group_all` package entry covers all motors at once:
 
 ```yaml
   group_all:
@@ -279,27 +366,106 @@ A single `group_all` package entry is included by default and covers all motors 
       vars:
         group_name: "All Awnings"
         group_id: awning_all
-        channel_l: "0x00"
-        channel_h: "0x00"
 ```
 
-This sends a broadcast frame with ID=0x00, ChanL=0x00, ChanH=0x00, which all motors respond to. Channel-filtered broadcast (ID=0 with non-zero channel bytes) **does not work** — motors respond to any ID=0 broadcast regardless of their programmed channel.
+This sends a broadcast frame with ID=0x00, ChanL=0x00, ChanH=0x00, which all motors obey. Channel-filtered broadcast (ID=0 with non-zero channel bytes) **does not work** — motors obey any ID=0 frame regardless of their programmed channel.
 
-### Scaling to fewer or more motors
+### Adding or removing motors
 
-To **remove** motors 7 and 8: delete the `motor_7` and `motor_8` package blocks from the `packages:` section. That's it — the poll query, availability check, and RX dispatch branch are all removed automatically.
+To **remove** a motor, delete its `motor_N` package block. To **add** one, copy
+an existing block, increment the key and set `motor_id`, `motor_name`,
+`channel_l` and `channel_h`. Nothing else needs to change: every cover carries
+its own poll command and state filter.
 
-To **add** a 9th motor: add a `motor_9:` package block (copy any existing entry, set `motor_id: "9"` and the correct `channel_l`/`channel_h`). The poll query, availability check, and RX dispatch branch are added automatically via `!extend`.
+All `motor_id` values must match the ID programmed into the physical motor hardware (see [Addressing motors](#addressing-motors-programming-ids-and-channels)).
 
-All `motor_id` values must match the ID programmed into the physical motor hardware (see [Addressing motors](#addressing-motors)).
+---
+
+## Tools
+
+[tools/esp_probe.py](tools/esp_probe.py) connects to the controller over the
+ESPHome native API, sends frames through the **RS485 Raw Command** entity and
+prints the device log, which includes every RX/TX frame. Home Assistant is not
+involved, which makes it the quickest way to address motors or check the bus.
+
+```bash
+python -m venv .venv
+.venv/bin/pip install -r tools/requirements.txt      # Windows: .venv\Scripts\pip
+
+# status of motor 5
+.venv/bin/python tools/esp_probe.py "9a 05 02 00 cc 00"
+
+# close motor 4 for six seconds, then stop it
+.venv/bin/python tools/esp_probe.py "9a 04 01 00 0a ee" @6 "9a 04 01 00 0a cc"
+
+# find programmed motors on channel 1 (queries IDs 01–ff)
+.venv/bin/python tools/esp_probe.py --scan "01 00"
+```
+
+- The controller is reached at `awning-motor.local`; use `--host` or `ESPHOME_HOST` for an IP address.
+- The API key is read from `esphome/secrets.yaml`, or from `ESPHOME_API_KEY`.
+- `--gap` sets the pause between frames (default 4 s), `--listen` how long to keep logging afterwards (default 5 s). `@<seconds>` tokens replace `--gap` with explicit pauses.
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause |
+|---|---|
+| No reply to any frame | A and B swapped; wrong `uart_flow_control_pin`; on the Waveshare board try the 120R jumper |
+| Only `D8 00 …` replies | Motor not programmed, or factory-reset — see [Addressing motors](#addressing-motors-programming-ids-and-channels) |
+| A cover never updates | `motor_id` or channel bytes in the YAML don't match the motor |
+| Position always 0, running flag never set | End limits not set — see [End limits](#end-limits) |
+| No status replies while a motor moves | Observed behaviour: motors don't answer while running |
+
+---
+
+## Fork history
+
+| Repository | |
+|---|---|
+| [s3bi77/gumax-sunshade-esphome](https://github.com/s3bi77/gumax-sunshade-esphome) | The original project: protocol analysis, documentation and the uartex-based ESPHome configuration. All of the design and most of the configuration is theirs. |
+| this repository | Forked from s3bi77/gumax-sunshade-esphome at `7e81ed4` to run on a Waveshare ESP32-S3-RS485-CAN with five motors. |
+
+---
+
+## Changes in this fork
+
+Modified in October 2026. The full record is in the Git history; this is the summary.
+
+**Hardware**
+
+- Target board Waveshare ESP32-S3-RS485-CAN: `esp32-s3-devkitc-1`, 16 MB flash, ESP-IDF.
+- UART on RX GPIO18 / TX GPIO17; the transceiver's driver enable is switched through `flow_control_pin` on GPIO21.
+- Logging over the native USB port (`USB_SERIAL_JTAG`).
+
+**Configuration**
+
+- Five motors instead of eight: IDs 1–4 on channel 1, ID 5 on channel 2. The motors are programmed to match, see [This installation](#this-installation).
+- uartex pinned to tag `v260904` instead of `@latest` with `refresh: always`, so a rebuild produces the same firmware.
+- `rx_priority: loop`: receiving no longer blocks the ESPHome main loop, which had produced "took a long time" warnings.
+- Every received frame is logged at `DEBUG`, including replies no cover listens to (an unprogrammed motor answering as ID 0). The per-motor decode log moved from `INFO` to `DEBUG`.
+- `poll_interval` now takes effect: a package default in `motor.yaml` shadowed the value from the main file.
+- The package templates no longer have defaults for required values, so a missing `motor_id` fails the build instead of silently creating `awning_1`. The broadcast cover no longer takes channel vars the motors ignore.
+
+**Documentation**
+
+- README brought in line with the uartex configuration: removed features that no longer exist (online/offline sensors, status buttons, `offline_timeout_ms`, `!extend`-based dispatch); `direction_pin` corrected to `flow_control_pin`.
+- Added board wiring, a tested addressing procedure, the programming command in the protocol table, observations on response bytes, end limits and status while moving, and a troubleshooting table.
+
+**Tooling and housekeeping**
+
+- [tools/esp_probe.py](tools/esp_probe.py) for addressing and bus checks without Home Assistant.
+- Comments in English throughout.
+- Line endings normalised to LF, with `.gitattributes` and `.editorconfig`; one `.gitignore` at the root instead of two overlapping ones.
 
 ---
 
 ## Legal & disclaimer
 
-**Electrical safety**: Tubular awning motors operate at mains voltage (typically 230 V AC). Working on or near live mains wiring can cause **electric shock, fire, or death**. Always isolate mains power before accessing the motor internals, the PCB, or the RJ12 connectors. The author is not responsible for any injury, death, property damage, or fire resulting from the use of this project. **If you are not qualified to work with mains voltages, consult a licensed electrician.**
+**Electrical safety**: Tubular awning motors operate at mains voltage (typically 230 V AC). Working on or near live mains wiring can cause **electric shock, fire, or death**. Always isolate mains power before accessing the motor internals, the PCB, or the RJ12 connectors. The authors are not responsible for any injury, death, property damage, or fire resulting from the use of this project. **If you are not qualified to work with mains voltages, consult a licensed electrician.**
 
-**No warranty / no liability**: This project is provided as-is, with no warranty of any kind, express or implied. The author accepts no responsibility or liability for any damage to motors, ESP32 boards, associated hardware, property, or any other loss arising from the use, misuse, or inability to use this project. **Use entirely at your own risk.**
+**No warranty / no liability**: This project is provided as-is, with no warranty of any kind, express or implied. The authors accept no responsibility or liability for any damage to motors, ESP32 boards, associated hardware, property, or any other loss arising from the use, misuse, or inability to use this project. **Use entirely at your own risk.**
 
 **Reverse engineering**: The RS485 protocol documented here was derived by observing bus traffic on hardware already owned by the author. This is permitted for interoperability purposes under:
 - EU Software Directive 2009/24/EC, Article 6 (decompilation for interoperability)
@@ -311,6 +477,22 @@ All `motor_id` values must match the ID programmed into the physical motor hardw
 
 ## Credits
 
+- **Original project**: [s3bi77/gumax-sunshade-esphome](https://github.com/s3bi77/gumax-sunshade-esphome) — protocol analysis, documentation and ESPHome configuration this fork is built on.
 - **Protocol reference**: [Loxone Library — Electric Curtain Drive A-OK](https://library.loxone.com/detail/electric-curtain-drive-a-ok-1922/overview) — community documentation of the AOK-E AM68 RS485 protocol that helped confirm the frame structure.
-- **ESPHome** — open-source firmware framework ([Apache 2.0](https://github.com/esphome/esphome/blob/dev/LICENSE)). All UART, cover, and template components used here are part of the mainline ESPHome project.
+- **ESPHome** — open-source firmware framework ([Apache 2.0](https://github.com/esphome/esphome/blob/dev/LICENSE)).
 - **uartex** by [eigger](https://github.com/eigger) — ESPHome external component that provides declarative RS485 frame parsing and command dispatch ([MIT License](https://github.com/eigger/espcomponents/blob/master/LICENSE), [source](https://github.com/eigger/espcomponents)).
+- **aioesphomeapi** — Python client for the ESPHome native API, used by `tools/esp_probe.py` ([MIT License](https://github.com/esphome/aioesphomeapi)).
+
+---
+
+## Licence
+
+Copyright of the original work belongs to its respective authors; see the Git
+history for authorship.
+
+This project is released under the MIT License, the licence of the upstream
+project. See the [LICENSE](LICENSE) file for the full text.
+
+The `LICENSE` file is carried over from the original project byte for byte,
+including its unfilled copyright placeholder; `.gitattributes` keeps it out of
+the repository's line-ending normalisation.
