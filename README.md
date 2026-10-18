@@ -23,7 +23,7 @@ under the same licence, the MIT License. See [Fork history](#fork-history),
 - **RS485 Raw Command** text entity to send any frame from Home Assistant (motor addressing, debugging)
 - Every received RS485 frame is logged at `DEBUG` level
 - **Web interface** built into the firmware (ESPHome `web_server` v3, password-protected) — works without Home Assistant, see [Web interface](#web-interface)
-- **Online sensor per motor**, a **fallback access point** with captive portal, and diagnostic entities (WiFi signal, uptime, IP, ESPHome version, restart / safe mode)
+- **Online, voltage and last-seen sensors per motor**, an **RS485 error** sensor, a **fallback access point** with captive portal, and diagnostic entities (WiFi signal, uptime, IP, ESPHome version, restart / safe mode)
 - Plain ESPHome YAML on top of the [uartex](https://github.com/eigger/espcomponents) external component
 - [tools/esp_probe.py](tools/esp_probe.py) — send frames and watch the bus from a PC, without Home Assistant
 
@@ -275,7 +275,7 @@ The motor usually sends this frame **twice** in quick succession after each stat
 | 1 | Motor ID (`0x00` = not programmed) |
 | 2 | Channel low byte |
 | 3 | Channel high byte |
-| 4–6 | Unknown. Byte 5 appears to be the supply voltage in volts (`0x17`/`0x18` observed) |
+| 4–6 | Unknown. Byte 5 appears to be the supply voltage in volts (`0x17`/`0x18` observed); reported as `Awning N Voltage` |
 | 7 | Position: 0–100 |
 | 8 | Zone flags: bit 0 = motor running |
 | 9 | Checksum: XOR of bytes 1–8 |
@@ -305,7 +305,7 @@ confirmed.
 esphome/
 ├── awning-motor.yaml          # main file — board, substitutions, motor list
 ├── packages/
-│   ├── motor.yaml             # template: cover + online sensor per motor
+│   ├── motor.yaml             # template: cover + diagnostic sensors per motor
 │   └── group.yaml             # template: all-awnings broadcast cover
 ├── secrets.yaml.example       # template for secrets.yaml
 └── secrets.yaml               # your credentials (git-ignored)
@@ -325,6 +325,9 @@ tools/
 | `RS485 Raw Command` text | `awning-motor.yaml` | — | Service | Send any frame, e.g. for addressing |
 | `Restart`, `Safe Mode` buttons | `awning-motor.yaml` | config | Service | Reboot; reboot into safe mode (OTA only) |
 | One `Awning N Online` binary sensor per motor | `packages/motor.yaml` | diagnostic | Diagnostics | Motor answers on the bus, see [Online sensors](#online-sensors) |
+| One `Awning N Voltage` sensor per motor | `packages/motor.yaml` | diagnostic | Diagnostics | Byte 5 of the status frame (V), see [Voltage and last seen](#voltage-and-last-seen) |
+| One `Awning N Last Seen` timestamp per motor | `packages/motor.yaml` | diagnostic | Diagnostics | Time of the motor's latest reply, see [Voltage and last seen](#voltage-and-last-seen) |
+| `RS485 Error` text sensor | `awning-motor.yaml` (uartex) | diagnostic | Diagnostics | Result of the last received frame, see [RS485 error sensor](#rs485-error-sensor) |
 | `WiFi Signal`, `Uptime` sensors | `awning-motor.yaml` | diagnostic | Diagnostics | RSSI (every 60 s), seconds since boot |
 | `IP Address`, `ESPHome Version` text sensors | `awning-motor.yaml` | diagnostic | Diagnostics | Network and firmware info |
 
@@ -365,7 +368,8 @@ packages:
         channel_h: ${group1_channel_h}
 ```
 
-Each entry generates one `awning_N` cover and one `Awning N Online` sensor.
+Each entry generates one `awning_N` cover and the `Awning N Online`,
+`Awning N Voltage` and `Awning N Last Seen` diagnostic sensors.
 The cover polls its motor every `poll_interval` and only accepts response
 frames that carry its `motor_id`. In the web interface the covers are sorted
 by `motor_id` (`sorting_weight: ${motor_id}` in `motor.yaml`).
@@ -410,7 +414,7 @@ The entities are arranged in three groups:
 |---|---|
 | Awnings | `Awning 1` … `Awning 5` in motor-ID order, then `All Awnings` |
 | Service | `RS485 Raw Command`, `Restart`, `Safe Mode` |
-| Diagnostics | `Awning N Online` per motor, `WiFi Signal`, `Uptime`, `IP Address`, `ESPHome Version` |
+| Diagnostics | Per motor `Awning N Online`, `Voltage`, `Last Seen`; then `RS485 Error`, `WiFi Signal`, `Uptime`, `IP Address`, `ESPHome Version` |
 
 The page also shows the live device log. The same login protects ESPHome's
 [REST and event-stream API](https://esphome.io/web-api/), e.g.:
@@ -507,6 +511,27 @@ Each valid frame restarts an internal script (`awning_N_online_watchdog`,
 reports whether that script is still running. The timeout therefore follows
 `poll_interval` automatically.
 
+### Voltage and last seen
+
+- `Awning N Voltage` shows byte 5 of the status frame in volts. `0x17`/`0x18`
+  (23/24 V) have been observed; it is probably the motor's internal DC
+  supply, but this is not confirmed. The value is sent only when it changes.
+- `Awning N Last Seen` (device class `timestamp`) is the time of the motor's
+  latest valid reply. The clock comes from Home Assistant (`time: platform:
+  homeassistant`), so the sensor stays empty until Home Assistant has
+  connected once after a reboot. To keep the history small it is updated
+  when the motor comes back online and then at most every 5 minutes; when the
+  motor goes offline it is set to the exact time of its last reply.
+
+### RS485 error sensor
+
+`RS485 Error` is uartex's built-in error sensor. It shows the result of the
+last received frame: `None` for a valid frame, otherwise `Size Error`,
+`Header Error`, `Checksum Error` and so on. It is only sent when the value
+changes, so a single disturbed frame shows up as a short error followed by
+`None` with the next valid frame. A value that stays on an error points to
+wiring, termination or a second device sending on the bus.
+
 ---
 
 ## Tools
@@ -581,6 +606,8 @@ change `ESPHOME_VERSION` in the workflow together with the version under
 | Position always 0, running flag never set | End limits not set — see [End limits](#end-limits) |
 | No status replies while a motor moves | Observed behaviour: motors don't answer while running |
 | `Awning N Online` stays off | No valid reply from that motor: check wiring, `motor_id` and channel bytes, as for a cover that never updates |
+| `Awning N Last Seen` stays empty | No time yet: Home Assistant has not connected since the last reboot |
+| `RS485 Error` stays on an error | Disturbed frames: check A/B wiring, the 120R termination and that nothing else transmits on the bus |
 
 ---
 
@@ -622,6 +649,7 @@ Modified in October 2026. The full record is in the Git history; this is the sum
 - CI workflow that validates and compiles the configuration; see [Continuous integration](#continuous-integration).
 - `secrets.yaml.example` gained `web_username`, `web_password` and `ap_password`, and a syntactically valid placeholder `api_key`.
 - Version 1.1.1: OTA uploads are encrypted with the API key instead of protected by `ota_password`, which is gone; see [Firmware updates (OTA)](#firmware-updates-ota).
+- Version 1.2.0: per-motor `Voltage` and `Last Seen` sensors, the `RS485 Error` sensor, and Home Assistant as time source; see [Voltage and last seen](#voltage-and-last-seen).
 
 **Documentation**
 

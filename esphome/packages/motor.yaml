@@ -14,12 +14,15 @@
 #           channel_h: "0x00"
 #
 # All four vars are required.  poll_interval is taken from the main file's
-# substitutions.
+# substitutions; the time source ha_time comes from the main file as well.
 #
 # Provides:
 #   • cover:          awning_${motor_id}  (uartex platform, full state + command support)
 #   • binary_sensor:  awning_${motor_id}_online  ("${motor_name} Online", diagnostic)
+#   • sensor:         awning_${motor_id}_voltage  ("${motor_name} Voltage", diagnostic)
+#   • text_sensor:    awning_${motor_id}_last_seen  ("${motor_name} Last Seen", diagnostic)
 #   • script:         awning_${motor_id}_online_watchdog  (internal timer)
+#   • globals:        awning_${motor_id}_last_seen_ts  (internal, UTC epoch)
 #
 # The uartex hub (defined in the main file) dispatches incoming RX frames to
 # each cover entity via the motor-ID state filter.  Polling is handled by
@@ -30,6 +33,11 @@
 # restarts the watchdog script.  The motor counts as online while the
 # script runs, i.e. until 3 poll intervals pass without a reply.  Motors do
 # not answer while they are moving, so a single missed poll is normal.
+#
+# Last seen: the time of the latest frame (UTC, once ha_time is synced).
+# Published when the motor comes back online, then at most every 5 minutes
+# to keep the Home Assistant history small, and with the exact time of the
+# last frame when the motor goes offline.
 # ===========================================================================
 
 cover:
@@ -57,10 +65,24 @@ cover:
     state_position: !lambda |-
       ESP_LOGD("awning", "Motor ${motor_id}  pos=%d%%  running=%d",
                data[6], data[7] & 0x01);
+      // Supply voltage (byte [4], meaning not confirmed): publish on change.
+      if (id(awning_${motor_id}_voltage).state != data[4])
+        id(awning_${motor_id}_voltage).publish_state(data[4]);
       // Restart the online watchdog.  stop() + execute() instead of relying
       // on mode: restart avoids a "restarting" DEBUG line for every frame.
+      const bool was_online = id(awning_${motor_id}_online_watchdog).is_running();
       id(awning_${motor_id}_online_watchdog).stop();
       id(awning_${motor_id}_online_watchdog).execute();
+      // Last seen (see header).
+      auto now = id(ha_time).utcnow();
+      if (now.is_valid()) {
+        static time_t published = 0;
+        id(awning_${motor_id}_last_seen_ts) = now.timestamp;
+        if (!was_online || now.timestamp - published >= 300) {
+          published = now.timestamp;
+          id(awning_${motor_id}_last_seen).publish_state(now.strftime("%Y-%m-%dT%H:%M:%SZ"));
+        }
+      }
       return 1.0f - (data[6] / 100.0f);
     #
     # TX payload bytes (uartex auto-prepends 0x9a header, appends XOR checksum):
@@ -84,6 +106,17 @@ script:
     mode: restart
     then:
       - delay: !lambda "return 3 * id(awning_${motor_id}).get_update_interval();"
+      # Gone offline: report the exact time of the last frame.
+      - lambda: |-
+          const time_t ts = id(awning_${motor_id}_last_seen_ts);
+          if (ts != 0)
+            id(awning_${motor_id}_last_seen).publish_state(
+                ESPTime::from_epoch_utc(ts).strftime("%Y-%m-%dT%H:%M:%SZ"));
+
+globals:
+  - id: awning_${motor_id}_last_seen_ts
+    type: time_t
+    initial_value: "0"
 
 binary_sensor:
   - platform: template
@@ -96,3 +129,31 @@ binary_sensor:
     web_server:
       sorting_group_id: sg_diagnostics
       sorting_weight: ${motor_id}
+
+# Byte [4] of the status frame; 0x17/0x18 (23/24) observed.  Likely the
+# motor's internal DC supply, not confirmed.  Published by state_position.
+sensor:
+  - platform: template
+    name: "${motor_name} Voltage"
+    id: awning_${motor_id}_voltage
+    unit_of_measurement: V
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    update_interval: never
+    web_server:
+      sorting_group_id: sg_diagnostics
+      sorting_weight: ${motor_id}.1
+
+# ISO 8601 in UTC; Home Assistant shows it in local time ("5 minutes ago").
+text_sensor:
+  - platform: template
+    name: "${motor_name} Last Seen"
+    id: awning_${motor_id}_last_seen
+    device_class: timestamp
+    entity_category: diagnostic
+    update_interval: never
+    web_server:
+      sorting_group_id: sg_diagnostics
+      sorting_weight: ${motor_id}.2

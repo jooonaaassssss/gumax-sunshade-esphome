@@ -113,7 +113,7 @@ esphome:
   # Bump the version on every firmware-relevant change (README → Versioning).
   project:
     name: jooonaaassssss.gumax-sunshade-esphome
-    version: "1.1.1"
+    version: "1.2.0"
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -152,6 +152,12 @@ wifi:
     password: !secret ap_password
 
 captive_portal:
+
+# Clock from Home Assistant (synced over the native API), used for the
+# per-motor "Last Seen" sensors.  No time until Home Assistant connects.
+time:
+  - platform: homeassistant
+    id: ha_time
 
 # ---------------------------------------------------------------------------
 # Web interface  –  http://${device_name}.local/  (LAN only, see README)
@@ -222,6 +228,13 @@ uartex:
   # motors and by tools/esp_probe.py.
   on_read:
     - lambda: 'ESP_LOGD("rs485", "RX %s", format_hex_pretty(data, len).c_str());'
+  # Result of the last received frame: "None" or e.g. "Checksum Error".
+  # Published only when it changes.
+  error:
+    name: "RS485 Error"
+    web_server:
+      sorting_group_id: sg_diagnostics
+      sorting_weight: 90
 
 # ---------------------------------------------------------------------------
 # Manual hex-command text entity
@@ -307,7 +320,8 @@ button:
       sorting_group_id: sg_service
       sorting_weight: 3
 
-# Diagnostics group: the per-motor Online sensors (weights 1…N) come first.
+# Diagnostics group: the per-motor sensors come first (Online, Voltage,
+# Last Seen at weights N, N.1, N.2), then RS485 Error (90).
 sensor:
   - platform: wifi_signal
     name: "WiFi Signal"
