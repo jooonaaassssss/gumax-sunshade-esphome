@@ -22,6 +22,8 @@ under the same licence, the MIT License. See [Fork history](#fork-history),
 - **All-awnings broadcast** cover — open/close/stop/position all motors with one command
 - **RS485 Raw Command** text entity to send any frame from Home Assistant (motor addressing, debugging)
 - Every received RS485 frame is logged at `DEBUG` level
+- **Web interface** built into the firmware (ESPHome `web_server` v3, password-protected) — works without Home Assistant, see [Web interface](#web-interface)
+- **Online sensor per motor**, a **fallback access point** with captive portal, and diagnostic entities (WiFi signal, uptime, IP, ESPHome version, restart / safe mode)
 - Plain ESPHome YAML on top of the [uartex](https://github.com/eigger/espcomponents) external component
 - [tools/esp_probe.py](tools/esp_probe.py) — send frames and watch the bus from a PC, without Home Assistant
 
@@ -55,16 +57,20 @@ The Gumax motors are physically identical to AOK-E AM68. The only difference is 
 
 ## Installation
 
-1. Create the secrets file and fill in Wi-Fi credentials, API key and OTA password:
+1. Create the secrets file and fill in Wi-Fi credentials, API key, OTA password,
+   web interface login and fallback AP password:
    ```bash
    cp esphome/secrets.yaml.example esphome/secrets.yaml
    ```
+   Generate your own `api_key` (`openssl rand -base64 32`); the value in the
+   example file is a public placeholder that only exists so CI can validate
+   the configuration.
 2. Adjust the `substitutions:` and `packages:` blocks in [esphome/awning-motor.yaml](esphome/awning-motor.yaml) to your board, motor IDs, names and channels (see [ESPHome configuration](#esphome-configuration)).
 3. Flash. The first time over USB-C, afterwards over Wi-Fi (OTA):
    ```bash
    esphome run esphome/awning-motor.yaml
    ```
-   With the ESPHome Device Builder in Home Assistant instead, copy `awning-motor.yaml` and the `packages/` folder to `/config/esphome/` and add the four keys to the Device Builder's own `secrets.yaml`.
+   With the ESPHome Device Builder in Home Assistant instead, copy `awning-motor.yaml` and the `packages/` folder to `/config/esphome/` and add the seven keys from `secrets.yaml.example` to the Device Builder's own `secrets.yaml`.
 4. Add the discovered device in Home Assistant and enter the API key.
 5. Give every motor its ID, once per motor: [Addressing motors](#addressing-motors-programming-ids-and-channels).
 
@@ -298,22 +304,28 @@ confirmed.
 esphome/
 ├── awning-motor.yaml          # main file — board, substitutions, motor list
 ├── packages/
-│   ├── motor.yaml             # template: one cover per motor
+│   ├── motor.yaml             # template: cover + online sensor per motor
 │   └── group.yaml             # template: all-awnings broadcast cover
 ├── secrets.yaml.example       # template for secrets.yaml
 └── secrets.yaml               # your credentials (git-ignored)
 tools/
 ├── esp_probe.py               # send frames / watch the bus over the native API
 └── requirements.txt
+.github/workflows/
+└── validate.yml               # CI: esphome config + compile
 ```
 
 ### Entities
 
-| Entity | Source | Purpose |
-|---|---|---|
-| One cover per motor (`awning_N`) | `packages/motor.yaml` | Open/close/stop/position, position feedback |
-| `All Awnings` cover | `packages/group.yaml` | Broadcast to every motor (no feedback) |
-| `RS485 Raw Command` text | `awning-motor.yaml` | Send any frame, e.g. for addressing |
+| Entity | Source | Category | Web UI group | Purpose |
+|---|---|---|---|---|
+| One cover per motor (`awning_N`, e.g. `Awning 1`) | `packages/motor.yaml` | — | Awnings | Open/close/stop/position, position feedback |
+| `All Awnings` cover | `packages/group.yaml` | — | Awnings | Broadcast to every motor (no feedback) |
+| `RS485 Raw Command` text | `awning-motor.yaml` | — | Service | Send any frame, e.g. for addressing |
+| `Restart`, `Safe Mode` buttons | `awning-motor.yaml` | config | Service | Reboot; reboot into safe mode (OTA only) |
+| One `Awning N Online` binary sensor per motor | `packages/motor.yaml` | diagnostic | Diagnostics | Motor answers on the bus, see [Online sensors](#online-sensors) |
+| `WiFi Signal`, `Uptime` sensors | `awning-motor.yaml` | diagnostic | Diagnostics | RSSI (every 60 s), seconds since boot |
+| `IP Address`, `ESPHome Version` text sensors | `awning-motor.yaml` | diagnostic | Diagnostics | Network and firmware info |
 
 ### Step 1 — Substitutions
 
@@ -352,8 +364,10 @@ packages:
         channel_h: ${group1_channel_h}
 ```
 
-Each entry generates one `awning_N` cover. It polls its motor every
-`poll_interval` and only accepts response frames that carry its `motor_id`.
+Each entry generates one `awning_N` cover and one `Awning N Online` sensor.
+The cover polls its motor every `poll_interval` and only accepts response
+frames that carry its `motor_id`. In the web interface the covers are sorted
+by `motor_id` (`sorting_weight: ${motor_id}` in `motor.yaml`).
 
 ### Step 3 — All-awnings broadcast cover
 
@@ -378,6 +392,89 @@ an existing block, increment the key and set `motor_id`, `motor_name`,
 its own poll command and state filter.
 
 All `motor_id` values must match the ID programmed into the physical motor hardware (see [Addressing motors](#addressing-motors-programming-ids-and-channels)).
+
+---
+
+## Web interface
+
+The firmware contains ESPHome's own web interface (`web_server` version 3,
+`local: true`, so it needs no internet access). Open
+[http://awning-motor.local/](http://awning-motor.local/) (or the controller's
+IP address) and log in with `web_username` / `web_password` from
+`secrets.yaml`.
+
+The entities are arranged in three groups:
+
+| Group | Entities |
+|---|---|
+| Awnings | `Awning 1` … `Awning 5` in motor-ID order, then `All Awnings` |
+| Service | `RS485 Raw Command`, `Restart`, `Safe Mode` |
+| Diagnostics | `Awning N Online` per motor, `WiFi Signal`, `Uptime`, `IP Address`, `ESPHome Version` |
+
+The page also shows the live device log. The same login protects ESPHome's
+[REST and event-stream API](https://esphome.io/web-api/), e.g.:
+
+```bash
+curl --digest -u admin:YourWebPassword "http://awning-motor.local/cover/Awning%201"
+curl --digest -u admin:YourWebPassword -X POST "http://awning-motor.local/cover/Awning%201/stop"
+```
+
+Firmware upload through the web interface is disabled (`ota: false`);
+updates go through the encrypted native API (`esphome run` / `esphome upload`).
+
+> **Security** — The login uses HTTP Digest authentication (`type: digest`),
+> so the password itself is not sent in clear text, but the connection is
+> plain, unencrypted HTTP: everything else, including commands and the device
+> log, can be read by anyone on the network path. Use the web interface on
+> your own LAN only. **Never expose port 80 to the internet** (no port
+> forwarding, no reverse proxy without its own TLS and authentication). Use a
+> password that you do not use anywhere else.
+
+A custom overview page loaded through `js_include` was evaluated and left
+out: with `local: true` the firmware serves the bundled v3 page, which never
+loads the `js_include` script (`/0.js`); it is only loaded together with the
+online (CDN) build of the interface. The sorting groups above give the same
+overview without extra code.
+
+---
+
+## Fallback access point
+
+If the configured Wi-Fi network cannot be reached for 90 s (`ap_timeout`
+default), the controller opens its own access point named `awning-motor`,
+protected with `ap_password` from `secrets.yaml`. Connect to it and the
+captive portal opens, where you can enter new Wi-Fi credentials. The access
+point closes again once the controller is back on the normal network.
+
+> The captive portal has no login of its own and also accepts a firmware
+> upload, so the access point password is its only protection: choose a
+> strong one.
+
+`wifi: fast_connect` is deliberately left off. With a mesh or several access
+points that share one SSID, the default full scan connects to the strongest
+one; `fast_connect` takes the first match. Only enable it for a single fixed
+access point or a hidden SSID.
+
+---
+
+## Online sensors
+
+Every motor gets a binary sensor `Awning N Online` (device class
+`connectivity`, category diagnostic), generated by `packages/motor.yaml`.
+
+- It turns **on** as soon as a valid status frame from that motor arrives:
+  correct header, length and checksum (checked by the uartex hub) and the
+  motor's own ID (checked by the cover's state filter).
+- It turns **off** only after **3 poll intervals** without a reply (90 s with
+  `poll_interval: 30s`). Motors do not answer while they are moving, so a
+  single missed poll is normal and must not mark a motor offline.
+- After a reboot it is off until the motor answers its first poll (at most
+  one poll interval).
+
+Each valid frame restarts an internal script (`awning_N_online_watchdog`,
+`mode: restart`) that waits 3 × the cover's update interval; the sensor
+reports whether that script is still running. The timeout therefore follows
+`poll_interval` automatically.
 
 ---
 
@@ -408,6 +505,41 @@ python -m venv .venv
 
 ---
 
+## Versioning
+
+The firmware reports a project name and version through `esphome: project:`
+in [esphome/awning-motor.yaml](esphome/awning-motor.yaml). Home Assistant
+shows it in the device info next to the ESPHome version.
+
+The version follows [Semantic Versioning](https://semver.org/) and is bumped
+in the same commit as the change:
+
+| Bump | When | Example |
+|---|---|---|
+| Major (`2.0.0`) | Existing entities are renamed or removed, or behaviour changes so that Home Assistant automations or dashboards must be adapted | Renaming `Awning 1`, changing the position convention |
+| Minor (`1.2.0`) | New entities or features; existing ones keep working | New sensor, new web UI group, new secret key |
+| Patch (`1.1.1`) | Fixes and internal changes without visible entity changes | Timing fix, uartex or ESPHome update, comments |
+
+README-only or CI-only changes do not change the firmware and need no bump.
+
+---
+
+## Continuous integration
+
+[.github/workflows/validate.yml](.github/workflows/validate.yml) runs on every
+push and pull request:
+
+1. installs ESPHome **2026.9.1** (pinned, matching the tested version),
+2. copies `secrets.yaml.example` to `secrets.yaml` (placeholders only),
+3. runs `esphome config` and `esphome compile` in `esphome/`.
+
+PlatformIO and toolchain downloads are cached between runs. The workflow
+publishes nothing: no firmware artifacts, no releases. When updating ESPHome,
+change `ESPHOME_VERSION` in the workflow together with the version under
+[Requirements](#requirements).
+
+---
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
@@ -417,6 +549,7 @@ python -m venv .venv
 | A cover never updates | `motor_id` or channel bytes in the YAML don't match the motor |
 | Position always 0, running flag never set | End limits not set — see [End limits](#end-limits) |
 | No status replies while a motor moves | Observed behaviour: motors don't answer while running |
+| `Awning N Online` stays off | No valid reply from that motor: check wiring, `motor_id` and channel bytes, as for a cover that never updates |
 
 ---
 
@@ -448,9 +581,19 @@ Modified in October 2026. The full record is in the Git history; this is the sum
 - `poll_interval` now takes effect: a package default in `motor.yaml` shadowed the value from the main file.
 - The package templates no longer have defaults for required values, so a missing `motor_id` fails the build instead of silently creating `awning_1`. The broadcast cover no longer takes channel vars the motors ignore.
 
+**Web interface and operation (version 1.1.0)**
+
+- ESPHome web interface (`web_server` v3, local, Digest login, web OTA disabled) with the groups Awnings, Service and Diagnostics; see [Web interface](#web-interface).
+- New per-motor online sensors, implemented in `packages/motor.yaml` with a watchdog script; see [Online sensors](#online-sensors).
+- Fallback access point with captive portal; see [Fallback access point](#fallback-access-point).
+- Diagnostic and service entities: WiFi signal, uptime, IP address, ESPHome version, restart and safe-mode buttons.
+- `esphome: project:` name and version; see [Versioning](#versioning).
+- CI workflow that validates and compiles the configuration; see [Continuous integration](#continuous-integration).
+- `secrets.yaml.example` gained `web_username`, `web_password` and `ap_password`, and a syntactically valid placeholder `api_key`.
+
 **Documentation**
 
-- README brought in line with the uartex configuration: removed features that no longer exist (online/offline sensors, status buttons, `offline_timeout_ms`, `!extend`-based dispatch); `direction_pin` corrected to `flow_control_pin`.
+- README brought in line with the uartex configuration: removed features that no longer existed at the time (the upstream online/offline sensors, status buttons, `offline_timeout_ms`, `!extend`-based dispatch); `direction_pin` corrected to `flow_control_pin`. Online sensors were later added back with a new implementation (see above).
 - Added board wiring, a tested addressing procedure, the programming command in the protocol table, observations on response bytes, end limits and status while moving, and a troubleshooting table.
 
 **Tooling and housekeeping**
@@ -482,6 +625,7 @@ Modified in October 2026. The full record is in the Git history; this is the sum
 - **ESPHome** — open-source firmware framework ([Apache 2.0](https://github.com/esphome/esphome/blob/dev/LICENSE)).
 - **uartex** by [eigger](https://github.com/eigger) — ESPHome external component that provides declarative RS485 frame parsing and command dispatch ([MIT License](https://github.com/eigger/espcomponents/blob/master/LICENSE), [source](https://github.com/eigger/espcomponents)).
 - **aioesphomeapi** — Python client for the ESPHome native API, used by `tools/esp_probe.py` ([MIT License](https://github.com/esphome/aioesphomeapi)).
+- **Inspiration for the web interface and operational features**: [Tysonpower/HCPBridgeMqtt_tynet](https://github.com/Tysonpower/HCPBridgeMqtt_tynet) — its ESPHome configuration was the inspiration for the web interface, fallback access point, diagnostics and project versioning here, adapted to five motors on one RS485 bus.
 
 ---
 
