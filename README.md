@@ -50,7 +50,7 @@ The Gumax motors are physically identical to AOK-E AM68. The only difference is 
 
 **Software**
 - [ESPHome](https://esphome.io/guides/installing_esphome) 2026.9 (tested with 2026.9.1). The uartex component is pinned to tag `v260904` in [esphome/awning-motor.yaml](esphome/awning-motor.yaml); update ESPHome and uartex together.
-- Home Assistant (optional but recommended for the cover UI)
+- Home Assistant (optional but recommended for the cover UI; it is also the clock for the `Last Seen` sensors)
 - Python 3 with [aioesphomeapi](https://pypi.org/project/aioesphomeapi/), only for [tools/esp_probe.py](tools/esp_probe.py)
 
 ---
@@ -425,7 +425,8 @@ curl --digest -u admin:YourWebPassword -X POST "http://awning-motor.local/cover/
 ```
 
 Firmware upload through the web interface is disabled (`ota: false`);
-updates go through the encrypted native API (`esphome run` / `esphome upload`).
+updates go through ESPHome's encrypted OTA (`esphome run` / `esphome upload`),
+see [Firmware updates (OTA)](#firmware-updates-ota).
 
 > **Security** — The login uses HTTP Digest authentication (`type: digest`),
 > so the password itself is not sent in clear text, but the connection is
@@ -608,6 +609,8 @@ change `ESPHOME_VERSION` in the workflow together with the version under
 | `Awning N Online` stays off | No valid reply from that motor: check wiring, `motor_id` and channel bytes, as for a cover that never updates |
 | `Awning N Last Seen` stays empty | No time yet: Home Assistant has not connected since the last reboot |
 | `RS485 Error` stays on an error | Disturbed frames: check A/B wiring, the 120R termination and that nothing else transmits on the bus |
+| A cover shows "open" although its motor never answered | ESPHome covers have no "unknown" state; the cover keeps its start value until the first reply. Check `Awning N Online` |
+| OTA upload refused | The uploader's `api_key` differs from the one in the firmware; see [Firmware updates (OTA)](#firmware-updates-ota) |
 
 ---
 
@@ -639,7 +642,7 @@ Modified in October 2026. The full record is in the Git history; this is the sum
 - `poll_interval` now takes effect: a package default in `motor.yaml` shadowed the value from the main file.
 - The package templates no longer have defaults for required values, so a missing `motor_id` fails the build instead of silently creating `awning_1`. The broadcast cover no longer takes channel vars the motors ignore.
 
-**Web interface and operation (version 1.1.0)**
+**Web interface and operation (versions 1.1.0 to 1.2.0)**
 
 - ESPHome web interface (`web_server` v3, local, Digest login, web OTA disabled) with the groups Awnings, Service and Diagnostics; see [Web interface](#web-interface).
 - New per-motor online sensors, implemented in `packages/motor.yaml` with a watchdog script; see [Online sensors](#online-sensors).
