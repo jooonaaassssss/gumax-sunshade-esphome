@@ -1,11 +1,13 @@
-# ESPHome build artefacts
+# ESPHome build output
 .esphome/
 
-# Secrets file – never commit this
-esphome/secrets.yaml
+# Credentials; the template is esphome/secrets.yaml.example
+secrets.yaml
+
+# Python
+.venv/
+__pycache__/
 
 # OS
 .DS_Store
 Thumbs.db
-secrets.yaml
-.esphome/
