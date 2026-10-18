@@ -57,20 +57,21 @@ The Gumax motors are physically identical to AOK-E AM68. The only difference is 
 
 ## Installation
 
-1. Create the secrets file and fill in Wi-Fi credentials, API key, OTA password,
-   web interface login and fallback AP password:
+1. Create the secrets file and fill in Wi-Fi credentials, API key, web
+   interface login and fallback AP password:
    ```bash
    cp esphome/secrets.yaml.example esphome/secrets.yaml
    ```
    Generate your own `api_key` (`openssl rand -base64 32`); the value in the
    example file is a public placeholder that only exists so CI can validate
-   the configuration.
+   the configuration. The API key also encrypts firmware updates, see
+   [Firmware updates (OTA)](#firmware-updates-ota).
 2. Adjust the `substitutions:` and `packages:` blocks in [esphome/awning-motor.yaml](esphome/awning-motor.yaml) to your board, motor IDs, names and channels (see [ESPHome configuration](#esphome-configuration)).
 3. Flash. The first time over USB-C, afterwards over Wi-Fi (OTA):
    ```bash
    esphome run esphome/awning-motor.yaml
    ```
-   With the ESPHome Device Builder in Home Assistant instead, copy `awning-motor.yaml` and the `packages/` folder to `/config/esphome/` and add the seven keys from `secrets.yaml.example` to the Device Builder's own `secrets.yaml`.
+   With the ESPHome Device Builder in Home Assistant instead, copy `awning-motor.yaml` and the `packages/` folder to `/config/esphome/` and add the six keys from `secrets.yaml.example` to the Device Builder's own `secrets.yaml`.
 4. Add the discovered device in Home Assistant and enter the API key.
 5. Give every motor its ID, once per motor: [Addressing motors](#addressing-motors-programming-ids-and-channels).
 
@@ -438,6 +439,36 @@ overview without extra code.
 
 ---
 
+## Firmware updates (OTA)
+
+Over-the-air updates use ESPHome's native OTA (`ota: platform: esphome`)
+with `encryption:` and no password. The upload is encrypted and
+authenticated with the same `api_key` as the native API, so there is no
+separate OTA password, and the firmware image (which contains the Wi-Fi
+credentials and the API key) never crosses the network in clear text. The
+controller refuses unencrypted uploads.
+
+- Whoever builds and uploads the firmware (ESPHome CLI or Device Builder)
+  needs the same `api_key` in `secrets.yaml`.
+- If the key is lost, the firmware can only be replaced over USB-C (or via
+  the captive portal in fallback access point mode).
+
+**Migrating an existing device from an OTA password** must take two steps,
+because firmware built before ESPHome 2026.9 cannot receive an encrypted
+upload:
+
+1. Flash firmware built with ESPHome 2026.9 or newer that has an API
+   encryption key, still with `password:`. The device log (`dump_config`)
+   then shows `Encryption: offered, plaintext accepted`.
+2. Replace `password:` with `encryption:`, flash again and check that the log
+   shows `Encryption: required`. Then `ota_password` can be removed from
+   `secrets.yaml`.
+
+ESPHome drops the plaintext fallback in 2027.3, so step 1 alone is not
+enough in the long run.
+
+---
+
 ## Fallback access point
 
 If the configured Wi-Fi network cannot be reached for 90 s (`ap_timeout`
@@ -590,6 +621,7 @@ Modified in October 2026. The full record is in the Git history; this is the sum
 - `esphome: project:` name and version; see [Versioning](#versioning).
 - CI workflow that validates and compiles the configuration; see [Continuous integration](#continuous-integration).
 - `secrets.yaml.example` gained `web_username`, `web_password` and `ap_password`, and a syntactically valid placeholder `api_key`.
+- Version 1.1.1: OTA uploads are encrypted with the API key instead of protected by `ota_password`, which is gone; see [Firmware updates (OTA)](#firmware-updates-ota).
 
 **Documentation**
 

@@ -113,7 +113,7 @@ esphome:
   # Bump the version on every firmware-relevant change (README → Versioning).
   project:
     name: jooonaaassssss.gumax-sunshade-esphome
-    version: "1.1.0"
+    version: "1.1.1"
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -130,9 +130,12 @@ api:
   encryption:
     key: !secret api_key
 
+# OTA uploads are encrypted and authenticated with the API key above
+# (no separate OTA password).  Plaintext uploads are refused, so a lost
+# api_key means flashing over USB.  See README → Firmware updates (OTA).
 ota:
   - platform: esphome
-    password: !secret ota_password
+    encryption:
 
 wifi:
   ssid: !secret wifi_ssid
