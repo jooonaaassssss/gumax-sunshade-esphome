@@ -1,7 +1,7 @@
 # ===========================================================================
-# packages/group.yaml  –  channel-group cover package template (uartex platform)
+# packages/group.yaml  –  broadcast cover package template (uartex platform)
 #
-# Included once per group by awning-motor.yaml via:
+# Included by awning-motor.yaml via:
 #
 #   packages:
 #     group_all:
@@ -10,22 +10,14 @@
 #         vars:
 #           group_name: "All Awnings"
 #           group_id: awning_all
-#           channel_l: "0x00"
-#           channel_h: "0x00"
 #
 # Provides:
-#   • cover:  ${group_id}  (broadcasts to all motors on the given channel)
+#   • cover:  ${group_id}  (broadcasts to every motor on the bus)
 #
-# Note: channel-filtered group broadcasts (ID=0 with non-zero channel bytes)
-# do not work – motors respond to any ID=0 broadcast regardless of channel.
-# Use channel_l=0x00, channel_h=0x00 for an all-motors broadcast.
+# Broadcast frames use ID=0x00 with both channel bytes 0x00.  Motors obey any
+# ID=0 frame regardless of their programmed channel, so a channel-filtered
+# group (ID=0 with non-zero channel bytes) is not possible.
 # ===========================================================================
-
-defaults:
-  group_name: "Awnings Group"
-  group_id: awning_group
-  channel_l: "0x00"
-  channel_h: "0x00"
 
 cover:
   - platform: uartex
@@ -33,17 +25,16 @@ cover:
     id: ${group_id}
     device_class: awning
     optimistic: true
-    # Group broadcasts use motor ID = 0x00.
-    # No state filter or state_position: the group cover does not track position
-    # (individual motor covers handle position feedback).
+    # No state filter or state_position: the broadcast cover does not track
+    # position (the individual motor covers handle position feedback).
     #
     # TX payload bytes (uartex auto-prepends 0x9a header, appends XOR checksum):
     command_open: !lambda |-
-      return {{0x00, ${channel_l}, ${channel_h}, 0x0a, 0xdd}};
+      return {{0x00, 0x00, 0x00, 0x0a, 0xdd}};
     command_close: !lambda |-
-      return {{0x00, ${channel_l}, ${channel_h}, 0x0a, 0xee}};
+      return {{0x00, 0x00, 0x00, 0x0a, 0xee}};
     command_stop: !lambda |-
-      return {{0x00, ${channel_l}, ${channel_h}, 0x0a, 0xcc}};
+      return {{0x00, 0x00, 0x00, 0x0a, 0xcc}};
     command_position: !lambda |-
       uint8_t pct = (uint8_t)((1.0f - x) * 100.0f + 0.5f);
-      return {{0x00, ${channel_l}, ${channel_h}, 0xdd, pct}, {}};
+      return {{0x00, 0x00, 0x00, 0xdd, pct}, {}};

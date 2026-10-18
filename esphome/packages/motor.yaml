@@ -8,25 +8,21 @@
 #       !include
 #         file: packages/motor.yaml
 #         vars:
-#           motor_id: "1"
+#           motor_id: 1
 #           motor_name: "Awning 1"
 #           channel_l: "0x01"
 #           channel_h: "0x00"
+#
+# All four vars are required.  poll_interval is taken from the main file's
+# substitutions.
 #
 # Provides:
 #   • cover:  awning_${motor_id}  (uartex platform, full state + command support)
 #
 # The uartex hub (defined in the main file) dispatches incoming RX frames to
 # each cover entity via the motor-ID state filter.  Polling is handled by
-# command_update fired at update_interval (inherited from poll_interval).
+# command_update fired every ${poll_interval}.
 # ===========================================================================
-
-defaults:
-  motor_id: 1
-  motor_name: "Awning 1"
-  channel_l: "0x01"
-  channel_h: "0x00"
-  poll_interval: 30s    # fallback; normally inherited from the main file
 
 cover:
   - platform: uartex
@@ -37,7 +33,8 @@ cover:
     #
     # RX frame payload bytes (after 0xd8 header, before XOR checksum):
     #   [0] motor ID   [1] ChanL   [2] ChanH
-    #   [3-5] (unused) [6] pos 0–100 (0=open)   [7] zone (bit 0 = moving)
+    #   [3-5] unknown ([4] appears to be the supply voltage in V, e.g. 0x18)
+    #   [6] pos 0–100 (0=open)   [7] zone (bit 0 = moving)
     #
     # State filter: only process frames whose first byte equals this motor's ID.
     state:
@@ -47,7 +44,7 @@ cover:
       match: prefix
     # Position mapping: raw 0 (open)→100 (closed)  ↔  ESPHome 1.0 (open)→0.0 (closed)
     state_position: !lambda |-
-      ESP_LOGI("awning_rx", "Motor ${motor_id}  pos=%d%%  running=%d",
+      ESP_LOGD("awning", "Motor ${motor_id}  pos=%d%%  running=%d",
                data[6], data[7] & 0x01);
       return 1.0f - (data[6] / 100.0f);
     #

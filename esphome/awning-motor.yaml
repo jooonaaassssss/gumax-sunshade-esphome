@@ -1,17 +1,19 @@
 # ===========================================================================
 # gumax-sunshade-esphome  –  AOK-E AM68 / Gumax RS485 awning motor controller
-# Angepasst für: Waveshare ESP32-S3-RS485-CAN (isoliertes RS485, SP3485)
+#
+# Board: Waveshare ESP32-S3-RS485-CAN (isolated RS485, direction pin GPIO21).
 #
 # USER CONFIGURATION: edit the substitutions block and the packages block
-# to match your motor IDs, names, and channel assignments.
+# to match your board, motor IDs, names and channel assignments.
 # Everything else should work unchanged for a standard installation.
 #
-# See README for full wiring instructions and protocol reference.
+# See README for wiring, motor addressing and the protocol reference.
 # ===========================================================================
 external_components:
-  - source: github://eigger/espcomponents@latest
+  # Pinned to a release tag so that a rebuild produces the same firmware.
+  # uartex follows ESPHome API changes: bump it deliberately and re-test.
+  - source: github://eigger/espcomponents@v260904
     components: [ uartex ]
-    refresh: always
 
 substitutions:
   device_name: awning-motor
@@ -20,10 +22,10 @@ substitutions:
   # ── UART pins (Waveshare ESP32-S3-RS485-CAN) ─────────────────────────────
   uart_rx_pin: GPIO18
   uart_tx_pin: GPIO17
-  uart_flow_control_pin: GPIO21   # DE/RE des SP3485 (Senderichtung)
+  uart_flow_control_pin: GPIO21   # RS485 driver enable (DE/RE)
 
   # ── Polling ───────────────────────────────────────────────────────────────
-  poll_interval: 30s        # How often to query all motors for status
+  poll_interval: 30s        # How often to query each motor for status
 
   # ── Channel bytes ─────────────────────────────────────────────────────────
   # These must match the channel programmed into each motor (see README).
@@ -38,13 +40,14 @@ substitutions:
   group2_channel_h: "0x00"
 
 # ---------------------------------------------------------------------------
-# Per-motor and per-group package includes
+# Per-motor and broadcast package includes
 #
-# Each motor_N entry creates:
-#   • one cover entity  (awning_N)  – polls via uartex command_update
+# Each motor_N entry creates one cover entity (awning_N) that is polled every
+# ${poll_interval}.  motor_id and the channel bytes must match what has been
+# programmed into the physical motor (README → "Addressing motors").
 #
-# Each group_N entry creates one optimistic cover entity that broadcasts to
-# all motors on the given channel.
+# This installation:  motors 1–4 = IDs 1–4 on channel 1,
+#                     motor 5    = ID 5   on channel 2.
 #
 # To add a motor: copy an existing motor_N block, increment the key, and
 # set motor_id, motor_name, channel_l, channel_h.  No other edits needed.
@@ -91,17 +94,16 @@ packages:
         motor_name: "Awning 5"
         channel_l: ${group2_channel_l}
         channel_h: ${group2_channel_h}
+
   # ── All-awnings broadcast (ID=0, ChanL=0, ChanH=0) ──────────────────────
-  # Note: channel-filtered group broadcast (ID=0 with non-zero channel bytes)
-  # does not work – motors respond to any ID=0 broadcast regardless of channel.
+  # Channel-filtered broadcasts (ID=0 with non-zero channel bytes) do not
+  # work: every motor obeys an ID=0 frame regardless of its channel.
   group_all:
     !include
       file: packages/group.yaml
       vars:
         group_name: "All Awnings"
         group_id: awning_all
-        channel_l: "0x00"
-        channel_h: "0x00"
 
 # ---------------------------------------------------------------------------
 esphome:
@@ -117,7 +119,7 @@ esp32:
 
 logger:
   level: DEBUG
-  hardware_uart: USB_SERIAL_JTAG   # Log über USB-C (native USB des S3)
+  hardware_uart: USB_SERIAL_JTAG   # logs on the native USB-C port
 
 api:
   encryption:
@@ -133,7 +135,7 @@ wifi:
 
 # ---------------------------------------------------------------------------
 # RS485 UART  –  2400 baud 8N1  (matches motor specification)
-# Waveshare-Board: Senderichtung wird über GPIO21 (flow_control_pin) gesteuert
+# flow_control_pin drives the transceiver's driver enable while transmitting.
 # ---------------------------------------------------------------------------
 uart:
   id: rs485_bus
@@ -162,6 +164,13 @@ uartex:
   rx_checksum: xor_no_header
   tx_checksum: xor_no_header
   tx_delay: 1500ms          # inter-command gap; gives each motor time to respond
+  rx_priority: loop         # non-blocking RX; keeps the main loop responsive
+  # Log every received frame at DEBUG (uartex itself only logs RX at VERBOSE;
+  # TX is already logged at DEBUG).  This includes replies no cover listens
+  # to, e.g. an unprogrammed motor answering as ID 0.  Used when addressing
+  # motors and by tools/esp_probe.py.
+  on_read:
+    - lambda: 'ESP_LOGD("rs485", "RX %s", format_hex_pretty(data, len).c_str());'
 
 # ---------------------------------------------------------------------------
 # Manual hex-command text entity
@@ -175,17 +184,21 @@ uartex:
 #
 # Frame layout:
 #   Byte 0: 9a              ← always the frame head  (stripped, auto-added)
-#   Byte 1: ID              ← 01–08 individual,  00 = group broadcast
+#   Byte 1: ID              ← 01–FF individual,  00 = broadcast
 #   Byte 2: ChanL           ← low channel byte
 #   Byte 3: ChanH           ← high channel byte
-#   Byte 4: Cmd1            ← 0a = motion,  dd = position
+#   Byte 4: Cmd1            ← 0a = motion,  dd = position,  cc = status,
+#                             aa = program ID/channel
 #   Byte 5: Cmd2            ← motion: dd=UP  cc=STOP  ee=DOWN
 #                             position: 00–64 hex (0=open … 100=closed)
+#                             status: 00,  program: aa
 #
 # Examples:
-#   Awning 1 UP    : 9a 01 01 00 0a dd
-#   Awning 3 STOP  : 9a 03 01 00 0a cc
-#   All UP         : 9a 00 00 00 0a dd
+#   Awning 1 UP          : 9a 01 01 00 0a dd
+#   Awning 3 STOP        : 9a 03 01 00 0a cc
+#   Awning 5 status      : 9a 05 02 00 cc 00
+#   All UP               : 9a 00 00 00 0a dd
+#   Program ID 2, ch. 1  : 9a 02 01 00 aa aa   (only one motor on the bus!)
 # ---------------------------------------------------------------------------
 text:
   - platform: template
@@ -220,5 +233,5 @@ text:
               return frame;
 
 # ---------------------------------------------------------------------------
-# Per-motor covers (awning_1 … awning_N), per-channel group covers, and
-# the all-awnings broadcast cover all come from the packages block above.
+# The per-motor covers (awning_1 … awning_N) and the all-awnings broadcast
+# cover come from the packages block above.
