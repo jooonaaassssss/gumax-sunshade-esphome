@@ -57,6 +57,9 @@ cover:
     state_position: !lambda |-
       ESP_LOGD("awning", "Motor ${motor_id}  pos=%d%%  running=%d",
                data[6], data[7] & 0x01);
+      // Restart the online watchdog.  stop() + execute() instead of relying
+      // on mode: restart avoids a "restarting" DEBUG line for every frame.
+      id(awning_${motor_id}_online_watchdog).stop();
       id(awning_${motor_id}_online_watchdog).execute();
       return 1.0f - (data[6] / 100.0f);
     #
