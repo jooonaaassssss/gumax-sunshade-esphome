@@ -17,11 +17,19 @@
 # substitutions.
 #
 # Provides:
-#   • cover:  awning_${motor_id}  (uartex platform, full state + command support)
+#   • cover:          awning_${motor_id}  (uartex platform, full state + command support)
+#   • binary_sensor:  awning_${motor_id}_online  ("${motor_name} Online", diagnostic)
+#   • script:         awning_${motor_id}_online_watchdog  (internal timer)
 #
 # The uartex hub (defined in the main file) dispatches incoming RX frames to
 # each cover entity via the motor-ID state filter.  Polling is handled by
 # command_update fired every ${poll_interval}.
+#
+# Online detection: every valid status frame from this motor (header,
+# length and checksum checked by the hub, ID checked by the state filter)
+# restarts the watchdog script.  The motor counts as online while the
+# script runs, i.e. until 3 poll intervals pass without a reply.  Motors do
+# not answer while they are moving, so a single missed poll is normal.
 # ===========================================================================
 
 cover:
@@ -49,6 +57,7 @@ cover:
     state_position: !lambda |-
       ESP_LOGD("awning", "Motor ${motor_id}  pos=%d%%  running=%d",
                data[6], data[7] & 0x01);
+      id(awning_${motor_id}_online_watchdog).execute();
       return 1.0f - (data[6] / 100.0f);
     #
     # TX payload bytes (uartex auto-prepends 0x9a header, appends XOR checksum):
@@ -65,3 +74,22 @@ cover:
     command_update: !lambda |-
       return {{(uint8_t)${motor_id}, ${channel_l}, ${channel_h}, 0xcc, 0x00}};
     update_interval: ${poll_interval}
+
+script:
+  # Restarted by every status frame; runs out after 3 poll intervals of silence.
+  - id: awning_${motor_id}_online_watchdog
+    mode: restart
+    then:
+      - delay: !lambda "return 3 * id(awning_${motor_id}).get_update_interval();"
+
+binary_sensor:
+  - platform: template
+    name: "${motor_name} Online"
+    id: awning_${motor_id}_online
+    device_class: connectivity
+    entity_category: diagnostic
+    # Off at boot until the first reply arrives.
+    lambda: "return id(awning_${motor_id}_online_watchdog).is_running();"
+    web_server:
+      sorting_group_id: sg_diagnostics
+      sorting_weight: ${motor_id}
