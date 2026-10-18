@@ -109,6 +109,11 @@ packages:
 esphome:
   name: ${device_name}
   friendly_name: ${friendly_name}
+  # Reported to Home Assistant and shown in the device info.
+  # Bump the version on every firmware-relevant change (README → Versioning).
+  project:
+    name: jooonaaassssss.gumax-sunshade-esphome
+    version: "1.1.0"
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -132,6 +137,18 @@ ota:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
+  # fast_connect is deliberately not set: with a mesh or several access points
+  # sharing the SSID, the default full scan picks the strongest AP.  Only
+  # enable it for a single, fixed AP (or a hidden SSID).
+  #
+  # Fallback hotspot: opens when the configured network is unreachable
+  # (after ap_timeout, default 90s).  Connect to it and use the captive
+  # portal to enter new WiFi credentials.
+  ap:
+    ssid: ${device_name}
+    password: !secret ap_password
+
+captive_portal:
 
 # ---------------------------------------------------------------------------
 # RS485 UART  –  2400 baud 8N1  (matches motor specification)
@@ -235,3 +252,32 @@ text:
 # ---------------------------------------------------------------------------
 # The per-motor covers (awning_1 … awning_N) and the all-awnings broadcast
 # cover come from the packages block above.
+
+# ---------------------------------------------------------------------------
+# Service buttons and diagnostics
+# ---------------------------------------------------------------------------
+button:
+  - platform: restart
+    name: "Restart"
+    entity_category: config
+  - platform: safe_mode
+    name: "Safe Mode"
+    entity_category: config
+
+sensor:
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
+    entity_category: diagnostic
+  - platform: uptime
+    name: "Uptime"
+    entity_category: diagnostic
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+      entity_category: diagnostic
+  - platform: version
+    name: "ESPHome Version"
+    entity_category: diagnostic
