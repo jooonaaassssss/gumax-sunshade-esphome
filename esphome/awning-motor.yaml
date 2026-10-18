@@ -151,6 +151,37 @@ wifi:
 captive_portal:
 
 # ---------------------------------------------------------------------------
+# Web interface  –  http://${device_name}.local/  (LAN only, see README)
+#
+# local: true embeds the v3 UI in the firmware (no internet/CDN needed).
+# ota: false keeps firmware uploads out of the web UI; updates go through
+# the encrypted native API (ota: esphome).  The captive portal still offers
+# its own upload page, but only in fallback AP mode.
+# ---------------------------------------------------------------------------
+web_server:
+  port: 80
+  version: 3
+  local: true
+  ota: false
+  auth:
+    # Digest: the password is never sent in clear text (ESPHome's recommended
+    # scheme and the default from 2027.1).  The connection itself is still
+    # unencrypted HTTP.
+    type: digest
+    username: !secret web_username
+    password: !secret web_password
+  sorting_groups:
+    - id: sg_awnings
+      name: "Awnings"
+      sorting_weight: 10
+    - id: sg_service
+      name: "Service"
+      sorting_weight: 20
+    - id: sg_diagnostics
+      name: "Diagnostics"
+      sorting_weight: 30
+
+# ---------------------------------------------------------------------------
 # RS485 UART  –  2400 baud 8N1  (matches motor specification)
 # flow_control_pin drives the transceiver's driver enable while transmitting.
 # ---------------------------------------------------------------------------
@@ -225,6 +256,9 @@ text:
     optimistic: true
     min_length: 0
     max_length: 50
+    web_server:
+      sorting_group_id: sg_service
+      sorting_weight: 1
     on_value:
       then:
         - uartex.write:
@@ -260,24 +294,43 @@ button:
   - platform: restart
     name: "Restart"
     entity_category: config
+    web_server:
+      sorting_group_id: sg_service
+      sorting_weight: 2
   - platform: safe_mode
     name: "Safe Mode"
     entity_category: config
+    web_server:
+      sorting_group_id: sg_service
+      sorting_weight: 3
 
+# Diagnostics group: the per-motor Online sensors (weights 1…N) come first.
 sensor:
   - platform: wifi_signal
     name: "WiFi Signal"
     update_interval: 60s
     entity_category: diagnostic
+    web_server:
+      sorting_group_id: sg_diagnostics
+      sorting_weight: 100
   - platform: uptime
     name: "Uptime"
     entity_category: diagnostic
+    web_server:
+      sorting_group_id: sg_diagnostics
+      sorting_weight: 101
 
 text_sensor:
   - platform: wifi_info
     ip_address:
       name: "IP Address"
       entity_category: diagnostic
+      web_server:
+        sorting_group_id: sg_diagnostics
+        sorting_weight: 102
   - platform: version
     name: "ESPHome Version"
     entity_category: diagnostic
+    web_server:
+      sorting_group_id: sg_diagnostics
+      sorting_weight: 103

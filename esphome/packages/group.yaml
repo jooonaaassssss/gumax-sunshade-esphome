@@ -25,6 +25,10 @@ cover:
     id: ${group_id}
     device_class: awning
     optimistic: true
+    # Listed after the individual motors (weights 1…N) in the web UI.
+    web_server:
+      sorting_group_id: sg_awnings
+      sorting_weight: 100
     # No state filter or state_position: the broadcast cover does not track
     # position (the individual motor covers handle position feedback).
     #

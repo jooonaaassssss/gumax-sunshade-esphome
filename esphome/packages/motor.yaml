@@ -30,6 +30,9 @@ cover:
     id: awning_${motor_id}
     device_class: awning
     optimistic: true
+    web_server:
+      sorting_group_id: sg_awnings
+      sorting_weight: ${motor_id}
     #
     # RX frame payload bytes (after 0xd8 header, before XOR checksum):
     #   [0] motor ID   [1] ChanL   [2] ChanH
