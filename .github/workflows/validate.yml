@@ -1,0 +1,56 @@
+# Validate and compile the ESPHome configuration on every push and PR.
+# Uses the placeholder secrets from secrets.yaml.example; no firmware is
+# published (no artifacts, no releases).
+name: Validate
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ESPHOME_VERSION: "2026.9.1"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: esphome
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Cache PlatformIO and ESP-IDF toolchains
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            esphome/.esphome/.espressif
+            esphome/.esphome/pio_components
+          key: pio-${{ runner.os }}-esphome-${{ env.ESPHOME_VERSION }}-${{ hashFiles('esphome/**/*.yaml', 'esphome/secrets.yaml.example') }}
+          restore-keys: |
+            pio-${{ runner.os }}-esphome-${{ env.ESPHOME_VERSION }}-
+
+      - name: Install ESPHome
+        run: pip install "esphome==${ESPHOME_VERSION}"
+
+      - name: Use placeholder secrets
+        run: cp secrets.yaml.example secrets.yaml
+
+      - name: esphome config
+        run: esphome config awning-motor.yaml
+
+      - name: esphome compile
+        run: esphome compile awning-motor.yaml
