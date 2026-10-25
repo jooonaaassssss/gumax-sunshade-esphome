@@ -366,7 +366,7 @@ tools/
 | Entity | Source | Category | Web UI group | Purpose |
 |---|---|---|---|---|
 | One cover per motor (`awning_N`, e.g. `Awning 1`) | `packages/motor.yaml` | — | Awnings | Open/close/stop/position, position feedback |
-| `All Awnings` cover | `packages/group.yaml` | — | Awnings | Broadcast to every motor (no feedback) |
+| `All Awnings` cover | `packages/group.yaml` | — | Awnings | Open/close/stop/position for every motor at once (broadcast, no feedback) |
 | `RS485 Raw Command` text | `awning-motor.yaml` | — | Service | Send any frame, e.g. for addressing |
 | `Restart`, `Safe Mode` buttons | `awning-motor.yaml` | config | Service | Reboot; reboot into safe mode (OTA only) |
 | `Programming Mode` switch | `packages/programming.yaml` | config | Programming | Enables the Program buttons; off at boot and after 10 min without use |
@@ -719,6 +719,7 @@ Modified in October 2026. The full record is in the Git history; this is the sum
 - Version 1.2.0: per-motor `Voltage` and `Last Seen` sensors, the `RS485 Error` sensor, and Home Assistant as time source; see [Voltage and last seen](#voltage-and-last-seen).
 - Version 1.2.1: raw position direction fixed (0 = closed, 100 = open) for feedback and position commands. Closed awnings had been shown as open after the next status poll; see [Position conventions](#position-conventions).
 - Version 1.3.0-beta.1: motor programming from the web interface and Home Assistant (`Programming Mode`, `Scan Bus`, `Programming Status`, one `Awning N Program` button per motor) in the new `packages/programming.yaml`; see [Addressing motors](#addressing-motors-programming-ids-and-channels). Beta: scan and refusals tested, the programming run itself not yet. Found on the way: programmed motors do not answer the broadcast status query, only a query for their own ID and channel.
+- Version 1.3.0-beta.1 also: `All Awnings` offers a position (slider in the web interface and Home Assistant). uartex only enables position support with a `state_position`; the broadcast cover now has one that returns its own optimistic position. Beta: whether the motors obey the broadcast position command is not tested yet.
 
 **Documentation**
 

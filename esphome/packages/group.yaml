@@ -29,8 +29,11 @@ cover:
     web_server:
       sorting_group_id: sg_awnings
       sorting_weight: 100
-    # No state filter or state_position: the broadcast cover does not track
-    # position (the individual motor covers handle position feedback).
+    # No state filter: the broadcast cover has no feedback of its own (the
+    # individual motor covers handle position feedback).  state_position only
+    # enables position support in uartex (the traits require it) and returns
+    # the cover's own optimistic position, so frames never change it.
+    state_position: !lambda "return id(${group_id}).position;"
     #
     # TX payload bytes (uartex auto-prepends 0x9a header, appends XOR checksum):
     command_open: !lambda |-
