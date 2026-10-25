@@ -21,8 +21,12 @@
 #   • binary_sensor:  awning_${motor_id}_online  ("${motor_name} Online", diagnostic)
 #   • sensor:         awning_${motor_id}_voltage  ("${motor_name} Voltage", diagnostic)
 #   • text_sensor:    awning_${motor_id}_last_seen  ("${motor_name} Last Seen", diagnostic)
+#   • button:         awning_${motor_id}_program  ("${motor_name} Program", config)
 #   • script:         awning_${motor_id}_online_watchdog  (internal timer)
 #   • globals:        awning_${motor_id}_last_seen_ts  (internal, UTC epoch)
+#
+# The Program button and the boot registration need
+# packages/programming.yaml (script prog_run, global prog_motors).
 #
 # The uartex hub (defined in the main file) dispatches incoming RX frames to
 # each cover entity via the motor-ID state filter.  Polling is handled by
@@ -157,3 +161,29 @@ text_sensor:
     web_server:
       sorting_group_id: sg_diagnostics
       sorting_weight: ${motor_id}.2
+
+# Programs the motor that is alone on the bus with this motor's ID and
+# channel (see packages/programming.yaml; needs Programming Mode).  The
+# motor is registered at boot so that Scan Bus queries it.
+esphome:
+  on_boot:
+    - lambda: |-
+        id(prog_motors).push_back((uint32_t(${motor_id}) << 16) |
+                                  (uint32_t(${channel_l}) << 8) | uint32_t(${channel_h}));
+
+button:
+  - platform: template
+    name: "${motor_name} Program"
+    id: awning_${motor_id}_program
+    icon: mdi:numeric
+    entity_category: config
+    web_server:
+      sorting_group_id: sg_programming
+      sorting_weight: ${motor_id}
+    on_press:
+      - script.execute:
+          id: prog_run
+          target_id: ${motor_id}
+          chan_l: !lambda "return ${channel_l};"
+          chan_h: !lambda "return ${channel_h};"
+          motor_name: "${motor_name}"

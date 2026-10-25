@@ -1,0 +1,314 @@
+# ===========================================================================
+# packages/programming.yaml  –  program motor IDs and channels from the UI
+#
+# Included once by awning-motor.yaml (no vars).  Required by
+# packages/motor.yaml: every motor registers its ID and channel in
+# prog_motors at boot, and its "<motor_name> Program" button runs prog_run
+# with that ID and channel, so the user only picks which motor is on the bus.
+#
+# Provides:
+#   • switch:       prog_mode    ("Programming Mode", config, off at boot,
+#                                 turns itself off after 10 min without use)
+#   • button:       prog_scan    ("Scan Bus", config)
+#   • text_sensor:  prog_status  ("Programming Status", diagnostic)
+#   • script:       prog_run, prog_exchange, prog_mode_timer  (internal)
+#
+# Every motor that hears a programming frame (ID CL CH aa aa) takes over the
+# new ID and channel, so only the motor to program may be on the bus.
+# prog_run checks that first.  Programmed motors only answer a status query
+# for their own ID and channel; the broadcast query (ID 0) is only answered
+# by unprogrammed motors.  The scan therefore sends the broadcast query and
+# one query per configured motor, and programming is only allowed when
+# exactly one motor answered and no frame was garbled.  Afterwards prog_run
+# queries the new ID to confirm.
+#
+# Limitation: a motor programmed with an ID/channel that is not in this
+# configuration answers none of these queries and cannot be detected.
+#
+# Needs the uartex hub id uartex_hub and the web_server sorting group
+# sg_programming from the main file.
+# ===========================================================================
+
+globals:
+  # Configured motors as (ID << 16 | CL << 8 | CH), filled by motor.yaml.
+  - id: prog_motors
+    type: std::vector<uint32_t>
+  # Distinct replies seen while collecting, same key format.
+  - id: prog_seen
+    type: std::vector<uint32_t>
+  # Receive errors while collecting (garbled frames).
+  - id: prog_errors
+    type: int
+    initial_value: "0"
+  # Frames prog_exchange could not send (TX queue timeout).
+  - id: prog_unsent
+    type: int
+    initial_value: "0"
+  # Payload of the frame prog_exchange waits for (cleared once it was sent).
+  - id: prog_expect
+    type: std::vector<uint8_t>
+  # Set when that frame was written to the bus.
+  - id: prog_written
+    type: bool
+    initial_value: "false"
+  # True while replies are collected (from the write until listen_ms later).
+  - id: prog_collect
+    type: bool
+    initial_value: "false"
+  # Set by prog_run when the scan allows programming.
+  - id: prog_go
+    type: bool
+    initial_value: "false"
+  # Target description for status messages, e.g. "ID 3 / channel 1".
+  - id: prog_target
+    type: std::string
+
+esphome:
+  on_boot:
+    - lambda: |-
+        id(uartex_hub).add_on_write_callback([](const uint8_t *data, const uint16_t len) {
+          // data = 0x9a header + payload + checksum
+          auto &expect = id(prog_expect);
+          if (expect.empty() || len != expect.size() + 2 ||
+              !std::equal(expect.begin(), expect.end(), data + 1))
+            return;
+          expect.clear();
+          id(prog_written) = true;
+          id(prog_collect) = true;
+        });
+        // Only valid frames (header, length, checksum) reach this callback.
+        id(uartex_hub).add_on_read_callback([](const uint8_t *data, const uint16_t len) {
+          if (!id(prog_collect) || len < 4) return;
+          // data = 0xd8 header, ID, CL, CH, ...
+          const uint32_t key = (uint32_t(data[1]) << 16) | (uint32_t(data[2]) << 8) | data[3];
+          auto &seen = id(prog_seen);
+          if (std::find(seen.begin(), seen.end(), key) == seen.end()) seen.push_back(key);
+        });
+        id(uartex_hub).add_on_error_callback([](const uartex::ERROR error) {
+          if (id(prog_collect)) id(prog_errors)++;
+        });
+
+switch:
+  - platform: template
+    id: prog_mode
+    name: "Programming Mode"
+    icon: mdi:wrench-clock
+    entity_category: config
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    web_server:
+      sorting_group_id: sg_programming
+      sorting_weight: 0.1
+    turn_on_action:
+      - script.execute: prog_mode_timer
+      - text_sensor.template.publish:
+          id: prog_status
+          state: "Programming Mode on: connect only the motor to program, then press its Program button"
+    turn_off_action:
+      - script.stop: prog_mode_timer
+      - text_sensor.template.publish:
+          id: prog_status
+          state: "Programming Mode off"
+
+button:
+  - platform: template
+    id: prog_scan
+    name: "Scan Bus"
+    icon: mdi:magnify-scan
+    entity_category: config
+    web_server:
+      sorting_group_id: sg_programming
+      sorting_weight: 0.2
+    on_press:
+      - script.execute:
+          id: prog_run
+          target_id: 0
+          chan_l: 0
+          chan_h: 0
+          motor_name: ""
+
+text_sensor:
+  - platform: template
+    id: prog_status
+    name: "Programming Status"
+    icon: mdi:information-outline
+    entity_category: diagnostic
+    update_interval: never
+    web_server:
+      sorting_group_id: sg_programming
+      sorting_weight: 0.3
+
+script:
+  # Switches Programming Mode off after 10 minutes; restarted on every use.
+  - id: prog_mode_timer
+    mode: restart
+    then:
+      - delay: 10min
+      - switch.turn_off: prog_mode
+
+  # Sends one frame and adds the replies received within listen_ms after it
+  # was actually written to prog_seen (the uartex TX queue may hold polls in
+  # front of it).  The caller clears prog_seen, prog_errors and prog_unsent.
+  - id: prog_exchange
+    mode: single
+    parameters:
+      target_id: int
+      chan_l: int
+      chan_h: int
+      cmd1: int
+      cmd2: int
+      listen_ms: int
+    then:
+      - lambda: |-
+          id(prog_written) = false;
+          id(prog_collect) = false;
+          id(prog_expect) = {(uint8_t) target_id, (uint8_t) chan_l, (uint8_t) chan_h,
+                             (uint8_t) cmd1, (uint8_t) cmd2};
+      - uartex.write:
+          data: !lambda |-
+            std::vector<uint8_t> frame{(uint8_t) target_id, (uint8_t) chan_l, (uint8_t) chan_h,
+                                       (uint8_t) cmd1, (uint8_t) cmd2};
+            return frame;
+      - wait_until:
+          condition:
+            lambda: "return id(prog_written);"
+          timeout: 15s
+      - if:
+          condition:
+            lambda: "return id(prog_written);"
+          then:
+            - delay: !lambda "return listen_ms;"
+          else:
+            - lambda: "id(prog_unsent)++;"
+      - lambda: |-
+          id(prog_collect) = false;
+          id(prog_expect).clear();
+
+  # target_id 0: scan only (Scan Bus).  Otherwise: scan, check that exactly
+  # one motor is on the bus, program it and confirm (needs Programming Mode).
+  - id: prog_run
+    mode: single
+    parameters:
+      target_id: int
+      chan_l: int
+      chan_h: int
+      motor_name: string
+    then:
+      - if:
+          condition:
+            lambda: "return target_id != 0 && !id(prog_mode).state;"
+          then:
+            - text_sensor.template.publish:
+                id: prog_status
+                state: "Refused: switch on Programming Mode first"
+          else:
+            - if:
+                condition:
+                  lambda: "return target_id != 0;"
+                then:
+                  - script.execute: prog_mode_timer
+            - text_sensor.template.publish:
+                id: prog_status
+                state: "Scanning bus..."
+            - lambda: |-
+                id(prog_seen).clear();
+                id(prog_errors) = 0;
+                id(prog_unsent) = 0;
+            # Iteration 0: broadcast query (unprogrammed motors).  Then one
+            # query per configured motor.
+            - repeat:
+                count: !lambda "return id(prog_motors).size() + 1;"
+                then:
+                  - script.execute:
+                      id: prog_exchange
+                      target_id: !lambda "return iteration == 0 ? 0 : int(id(prog_motors)[iteration - 1] >> 16);"
+                      chan_l: !lambda "return iteration == 0 ? 0 : int((id(prog_motors)[iteration - 1] >> 8) & 0xff);"
+                      chan_h: !lambda "return iteration == 0 ? 0 : int(id(prog_motors)[iteration - 1] & 0xff);"
+                      cmd1: 0xcc
+                      cmd2: 0x00
+                      listen_ms: 1000
+                  - script.wait: prog_exchange
+            - lambda: |-
+                auto describe = [](uint32_t key) -> std::string {
+                  const uint8_t motor = key >> 16, cl = (key >> 8) & 0xff, ch = key & 0xff;
+                  if (motor == 0) return "ID 0 (unprogrammed)";
+                  std::string channel;
+                  for (int b = 0; b < 8; b++) {
+                    if (ch == 0 && cl == (1 << b)) channel = std::to_string(b + 1);
+                    if (cl == 0 && ch == (1 << b)) channel = std::to_string(b + 9);
+                  }
+                  if (channel.empty()) {
+                    char raw[8];
+                    snprintf(raw, sizeof(raw), "%02X %02X", cl, ch);
+                    channel = raw;
+                  }
+                  return "ID " + std::to_string(motor) + " / channel " + channel;
+                };
+                const auto &seen = id(prog_seen);
+                std::string found;
+                for (const auto key : seen) {
+                  if (!found.empty()) found += ", ";
+                  found += describe(key);
+                }
+                std::string result;
+                if (id(prog_unsent) > 0)
+                  result = "scan frames could not be sent";
+                else if (id(prog_errors) > 0)
+                  result = std::to_string(id(prog_errors)) +
+                           " garbled replies, more than one motor connected?" +
+                           (found.empty() ? "" : " Also seen: " + found);
+                else if (seen.empty())
+                  result = "no motor answered";
+                else
+                  result = std::to_string(seen.size()) + (seen.size() == 1 ? " motor: " : " motors: ") + found;
+
+                const uint32_t target = (uint32_t(target_id) << 16) | (uint32_t(chan_l) << 8) | uint32_t(chan_h);
+                id(prog_target) = describe(target);
+                id(prog_go) = false;
+                std::string status;
+                if (target_id == 0)
+                  status = "Scan: " + result;
+                else if (id(prog_unsent) > 0 || id(prog_errors) > 0 || seen.size() != 1)
+                  status = "Refused (" + result + "). Connect only the motor to program.";
+                else if (seen[0] == target)
+                  status = motor_name + " is already " + id(prog_target);
+                else {
+                  id(prog_go) = true;
+                  status = "Programming " + motor_name + ": " + found + " -> " + id(prog_target) + "...";
+                }
+                ESP_LOGI("programming", "%s", status.c_str());
+                id(prog_status).publish_state(status);
+            - if:
+                condition:
+                  lambda: "return id(prog_go);"
+                then:
+                  # Programming frame; the 2 s listen time lets the motor settle.
+                  - script.execute:
+                      id: prog_exchange
+                      target_id: !lambda "return target_id;"
+                      chan_l: !lambda "return chan_l;"
+                      chan_h: !lambda "return chan_h;"
+                      cmd1: 0xaa
+                      cmd2: 0xaa
+                      listen_ms: 2000
+                  - script.wait: prog_exchange
+                  # Confirm: query the new ID.
+                  - lambda: "id(prog_seen).clear();"
+                  - script.execute:
+                      id: prog_exchange
+                      target_id: !lambda "return target_id;"
+                      chan_l: !lambda "return chan_l;"
+                      chan_h: !lambda "return chan_h;"
+                      cmd1: 0xcc
+                      cmd2: 0x00
+                      listen_ms: 3000
+                  - script.wait: prog_exchange
+                  - lambda: |-
+                      const uint32_t target = (uint32_t(target_id) << 16) | (uint32_t(chan_l) << 8) | uint32_t(chan_h);
+                      const auto &seen = id(prog_seen);
+                      const bool ok = std::find(seen.begin(), seen.end(), target) != seen.end();
+                      const std::string status = ok
+                          ? motor_name + " programmed: " + id(prog_target) + " confirmed"
+                          : motor_name + ": no reply as " + id(prog_target) + ", scan the bus and try again";
+                      ESP_LOGI("programming", "%s", status.c_str());
+                      id(prog_status).publish_state(status);

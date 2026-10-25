@@ -21,6 +21,7 @@ under the same licence, the MIT License. See [Fork history](#fork-history),
 - **Position feedback** read from the motor's own status frames, polled every 30 s
 - **All-awnings broadcast** cover — open/close/stop/position all motors with one command
 - **RS485 Raw Command** text entity to send any frame from Home Assistant (motor addressing, debugging)
+- **Motor programming from the UI**: one `Program` button per motor, guarded by a bus scan and a self-expiring `Programming Mode`, see [Addressing motors](#addressing-motors-programming-ids-and-channels)
 - Every received RS485 frame is logged at `DEBUG` level
 - **Web interface** built into the firmware (ESPHome `web_server` v3, password-protected) — works without Home Assistant, see [Web interface](#web-interface)
 - **Online, voltage and last-seen sensors per motor**, an **RS485 error** sensor, a **fallback access point** with captive portal, and diagnostic entities (WiFi signal, uptime, IP, ESPHome version, restart / safe mode)
@@ -209,16 +210,50 @@ Each motor must be programmed with a unique **ID** (0x01–0xFF in hex) and a **
           (VFY = 01 ^ 01 ^ 00 = 00)
 ```
 
-**Procedure** (used for [this installation](#this-installation)):
+**From the web interface or Home Assistant** (recommended):
+
+> **Beta (1.3.0-beta.1):** the scan and the refusals are tested on hardware;
+> programming a motor and the confirmation are not tested yet.
+
+The **Programming** group of the web interface, and the Configuration section of
+the device page in Home Assistant, hold a `Program` button per configured motor.
+The button programs the ID and channel from that motor's package entry, so
+nothing has to be looked up.
+
+1. Switch on **`Programming Mode`**. It switches itself off after 10 minutes
+   without use; every Program press restarts the 10 minutes.
+2. Connect **only** the motor to be programmed to the bus.
+3. Press its button, e.g. **`Awning 3 Program`**. The firmware
+   - scans the bus: the broadcast status query (answered by unprogrammed
+     motors only) and one status query per configured motor,
+   - refuses unless exactly one motor answered and no frame was garbled,
+   - sends the programming frame (the motor blinks blue three times),
+   - queries the new ID and channel to confirm.
+4. Read the result in **`Programming Status`**, e.g.
+   `Awning 3 programmed: ID 3 / channel 1 confirmed`, or
+   `Refused (2 motors: ID 1 / channel 1, ID 2 / channel 1). Connect only the motor to program.`
+5. Connect the next motor and continue with step 3.
+
+**`Scan Bus`** runs the same scan without programming and works without
+Programming Mode, e.g. `Scan: 1 motor: ID 0 (unprogrammed)`.
+
+A motor programmed with an ID or channel that is not in the configuration
+answers none of the scan queries. The scan cannot detect it, and Program is
+refused with "no motor answered". Reset such a motor to factory state (it then
+answers as ID 0) or program it with the raw frames below.
+
+**Procedure with raw frames** (used for [this installation](#this-installation)):
 
 Send the frames below either through the **RS485 Raw Command** entity in Home
 Assistant (and watch the ESPHome log) or with [tools/esp_probe.py](tools/esp_probe.py).
 The checksum is appended automatically.
 
 1. Connect **only** the motor to be programmed to the bus.
-2. Check the bus: send `9a 00 00 00 cc 00`. Every connected motor answers with its
-   own ID, so exactly one reply `D8 00 00 00 …` must come back. A reply with another
-   ID means an already programmed motor is still connected.
+2. Check the bus: send `9a 00 00 00 cc 00`. Only unprogrammed motors answer this
+   broadcast query, so exactly one reply `D8 00 00 00 …` must come back.
+   Programmed motors only answer a query for their own ID and channel, e.g.
+   `9a 01 01 00 cc 00`; query the configured IDs to make sure none of them is
+   still connected.
 3. Program it, e.g. ID 2 on channel 1: `9a 02 01 00 aa aa`.
 4. Verify: `9a 02 01 00 cc 00` must be answered with `D8 02 01 00 …`.
 5. Disconnect the motor, connect the next one, continue with step 2.
@@ -315,7 +350,8 @@ esphome/
 ├── awning-motor.yaml          # main file — board, substitutions, motor list
 ├── packages/
 │   ├── motor.yaml             # template: cover + diagnostic sensors per motor
-│   └── group.yaml             # template: all-awnings broadcast cover
+│   ├── group.yaml             # template: all-awnings broadcast cover
+│   └── programming.yaml       # motor programming: mode, bus scan, status
 ├── secrets.yaml.example       # template for secrets.yaml
 └── secrets.yaml               # your credentials (git-ignored)
 tools/
@@ -333,6 +369,10 @@ tools/
 | `All Awnings` cover | `packages/group.yaml` | — | Awnings | Broadcast to every motor (no feedback) |
 | `RS485 Raw Command` text | `awning-motor.yaml` | — | Service | Send any frame, e.g. for addressing |
 | `Restart`, `Safe Mode` buttons | `awning-motor.yaml` | config | Service | Reboot; reboot into safe mode (OTA only) |
+| `Programming Mode` switch | `packages/programming.yaml` | config | Programming | Enables the Program buttons; off at boot and after 10 min without use |
+| `Scan Bus` button | `packages/programming.yaml` | config | Programming | Lists the motors that answer, see [Addressing motors](#addressing-motors-programming-ids-and-channels) |
+| `Programming Status` text sensor | `packages/programming.yaml` | diagnostic | Programming | Result of the last scan or programming run |
+| One `Awning N Program` button per motor | `packages/motor.yaml` | config | Programming | Programs the only motor on the bus with this motor's ID and channel |
 | One `Awning N Online` binary sensor per motor | `packages/motor.yaml` | diagnostic | Diagnostics | Motor answers on the bus, see [Online sensors](#online-sensors) |
 | One `Awning N Voltage` sensor per motor | `packages/motor.yaml` | diagnostic | Diagnostics | Byte 5 of the status frame (V), see [Voltage and last seen](#voltage-and-last-seen) |
 | One `Awning N Last Seen` timestamp per motor | `packages/motor.yaml` | diagnostic | Diagnostics | Time of the motor's latest reply, see [Voltage and last seen](#voltage-and-last-seen) |
@@ -377,8 +417,9 @@ packages:
         channel_h: ${group1_channel_h}
 ```
 
-Each entry generates one `awning_N` cover and the `Awning N Online`,
-`Awning N Voltage` and `Awning N Last Seen` diagnostic sensors.
+Each entry generates one `awning_N` cover, the `Awning N Online`,
+`Awning N Voltage` and `Awning N Last Seen` diagnostic sensors and the
+`Awning N Program` button (which needs the `programming` package entry).
 The cover polls its motor every `poll_interval` and only accepts response
 frames that carry its `motor_id`. In the web interface the covers are sorted
 by `motor_id` (`sorting_weight: ${motor_id}` in `motor.yaml`).
@@ -397,6 +438,16 @@ A single `group_all` package entry covers all motors at once:
 ```
 
 This sends a broadcast frame with ID=0x00, ChanL=0x00, ChanH=0x00, which all motors obey. Channel-filtered broadcast (ID=0 with non-zero channel bytes) **does not work** — motors obey any ID=0 frame regardless of their programmed channel.
+
+### Step 4 — Programming package
+
+```yaml
+  programming: !include packages/programming.yaml
+```
+
+Required by `motor.yaml`: it provides `Programming Mode`, `Scan Bus`,
+`Programming Status` and the script behind the per-motor `Program` buttons,
+see [Addressing motors](#addressing-motors-programming-ids-and-channels).
 
 ### Adding or removing motors
 
@@ -417,12 +468,13 @@ The firmware contains ESPHome's own web interface (`web_server` version 3,
 IP address) and log in with `web_username` / `web_password` from
 `secrets.yaml`.
 
-The entities are arranged in three groups:
+The entities are arranged in four groups:
 
 | Group | Entities |
 |---|---|
 | Awnings | `Awning 1` … `Awning 5` in motor-ID order, then `All Awnings` |
 | Service | `RS485 Raw Command`, `Restart`, `Safe Mode` |
+| Programming | `Programming Mode`, `Scan Bus`, `Programming Status`, then `Awning 1 Program` … `Awning 5 Program` |
 | Diagnostics | Per motor `Awning N Online`, `Voltage`, `Last Seen`; then `RS485 Error`, `WiFi Signal`, `Uptime`, `IP Address`, `ESPHome Version` |
 
 The page also shows the live device log. The same login protects ESPHome's
@@ -585,6 +637,7 @@ in the same commit as the change:
 | Major (`2.0.0`) | Existing entities are renamed or removed, or behaviour changes so that Home Assistant automations or dashboards must be adapted | Renaming `Awning 1`, changing the position convention |
 | Minor (`1.2.0`) | New entities or features; existing ones keep working | New sensor, new web UI group, new secret key |
 | Patch (`1.1.1`) | Fixes and internal changes without visible entity changes | Timing fix, uartex or ESPHome update, comments |
+| Pre-release (`1.3.0-beta.1`) | The upcoming version while parts of it are not tested on hardware yet; becomes the plain version once tested | New feature flashed but not fully tried |
 
 README-only or CI-only changes do not change the firmware and need no bump.
 
@@ -620,6 +673,8 @@ change `ESPHOME_VERSION` in the workflow together with the version under
 | `RS485 Error` stays on an error | Disturbed frames: check A/B wiring, the 120R termination and that nothing else transmits on the bus |
 | A cover shows "open" although its motor never answered | ESPHome covers have no "unknown" state; the cover keeps its start value until the first reply. Check `Awning N Online` |
 | OTA upload refused | The uploader's `api_key` differs from the one in the firmware; see [Firmware updates (OTA)](#firmware-updates-ota) |
+| `Program` refused: "no motor answered" | The motor is not connected, or it carries an ID/channel that is not in the configuration; see [Addressing motors](#addressing-motors-programming-ids-and-channels) |
+| `Program` refused: "2 motors" / "garbled replies" | Another motor is still on the bus; disconnect it, press `Scan Bus` to check |
 
 ---
 
@@ -663,6 +718,7 @@ Modified in October 2026. The full record is in the Git history; this is the sum
 - Version 1.1.1: OTA uploads are encrypted with the API key instead of protected by `ota_password`, which is gone; see [Firmware updates (OTA)](#firmware-updates-ota).
 - Version 1.2.0: per-motor `Voltage` and `Last Seen` sensors, the `RS485 Error` sensor, and Home Assistant as time source; see [Voltage and last seen](#voltage-and-last-seen).
 - Version 1.2.1: raw position direction fixed (0 = closed, 100 = open) for feedback and position commands. Closed awnings had been shown as open after the next status poll; see [Position conventions](#position-conventions).
+- Version 1.3.0-beta.1: motor programming from the web interface and Home Assistant (`Programming Mode`, `Scan Bus`, `Programming Status`, one `Awning N Program` button per motor) in the new `packages/programming.yaml`; see [Addressing motors](#addressing-motors-programming-ids-and-channels). Beta: scan and refusals tested, the programming run itself not yet. Found on the way: programmed motors do not answer the broadcast status query, only a query for their own ID and channel.
 
 **Documentation**
 
