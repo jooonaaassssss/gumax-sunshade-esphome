@@ -113,7 +113,7 @@ esphome:
   # Bump the version on every firmware-relevant change (README → Versioning).
   project:
     name: jooonaaassssss.gumax-sunshade-esphome
-    version: "1.2.0"
+    version: "1.2.1"
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -254,7 +254,7 @@ uartex:
 #   Byte 4: Cmd1            ← 0a = motion,  dd = position,  cc = status,
 #                             aa = program ID/channel
 #   Byte 5: Cmd2            ← motion: dd=UP  cc=STOP  ee=DOWN
-#                             position: 00–64 hex (0=open … 100=closed)
+#                             position: 00–64 hex (0=closed … 100=open)
 #                             status: 00,  program: aa
 #
 # Examples:

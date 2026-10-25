@@ -40,5 +40,5 @@ cover:
     command_stop: !lambda |-
       return {{0x00, 0x00, 0x00, 0x0a, 0xcc}};
     command_position: !lambda |-
-      uint8_t pct = (uint8_t)((1.0f - x) * 100.0f + 0.5f);
+      uint8_t pct = (uint8_t)(x * 100.0f + 0.5f);
       return {{0x00, 0x00, 0x00, 0xdd, pct}, {}};

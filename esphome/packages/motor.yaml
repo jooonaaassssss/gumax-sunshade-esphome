@@ -31,8 +31,8 @@
 # Online detection: every valid status frame from this motor (header,
 # length and checksum checked by the hub, ID checked by the state filter)
 # restarts the watchdog script.  The motor counts as online while the
-# script runs, i.e. until 3 poll intervals pass without a reply.  Motors do
-# not answer while they are moving, so a single missed poll is normal.
+# script runs, i.e. until 3 poll intervals pass without a reply.  Motors
+# often do not answer while they are moving, so a single missed poll is normal.
 #
 # Last seen: the time of the latest frame (UTC, once ha_time is synced).
 # Published when the motor comes back online, then at most every 5 minutes
@@ -53,7 +53,7 @@ cover:
     # RX frame payload bytes (after 0xd8 header, before XOR checksum):
     #   [0] motor ID   [1] ChanL   [2] ChanH
     #   [3-5] unknown ([4] appears to be the supply voltage in V, e.g. 0x18)
-    #   [6] pos 0–100 (0=open)   [7] zone (bit 0 = moving)
+    #   [6] pos 0–100 (0=closed, 100=open)   [7] zone (bit 0 = moving)
     #
     # State filter: only process frames whose first byte equals this motor's ID.
     state:
@@ -61,7 +61,7 @@ cover:
       data:
         - ${motor_id}
       match: prefix
-    # Position mapping: raw 0 (open)→100 (closed)  ↔  ESPHome 1.0 (open)→0.0 (closed)
+    # Position mapping: raw 0 (closed)→100 (open)  ↔  ESPHome 0.0 (closed)→1.0 (open)
     state_position: !lambda |-
       ESP_LOGD("awning", "Motor ${motor_id}  pos=%d%%  running=%d",
                data[6], data[7] & 0x01);
@@ -83,7 +83,7 @@ cover:
           id(awning_${motor_id}_last_seen).publish_state(now.strftime("%Y-%m-%dT%H:%M:%SZ"));
         }
       }
-      return 1.0f - (data[6] / 100.0f);
+      return data[6] / 100.0f;
     #
     # TX payload bytes (uartex auto-prepends 0x9a header, appends XOR checksum):
     #
@@ -94,7 +94,7 @@ cover:
     command_stop: !lambda |-
       return {{(uint8_t)${motor_id}, ${channel_l}, ${channel_h}, 0x0a, 0xcc}};
     command_position: !lambda |-
-      uint8_t pct = (uint8_t)((1.0f - x) * 100.0f + 0.5f);
+      uint8_t pct = (uint8_t)(x * 100.0f + 0.5f);
       return {{(uint8_t)${motor_id}, ${channel_l}, ${channel_h}, 0xdd, pct}, {}};
     command_update: !lambda |-
       return {{(uint8_t)${motor_id}, ${channel_l}, ${channel_h}, 0xcc, 0x00}};

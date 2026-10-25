@@ -262,12 +262,12 @@ All multi-byte values are big-endian. Baud rate: **2400 8N1**.
 | `0x0A` | `0xCC` | STOP |
 | `0x0A` | `0xEE` | Move DOWN (close) |
 | `0xCC` | `0x00` | Status query (motor replies with a response frame) |
-| `0xDD` | `0x00`–`0x64` | Go to absolute position (0=open, 100=closed) |
+| `0xDD` | `0x00`–`0x64` | Go to absolute position (0=closed, 100=open) |
 | `0xAA` | `0xAA` | Program ID and channel (see [Addressing motors](#addressing-motors-programming-ids-and-channels)) |
 
 ### Response frame (motor → ESP32, 10 bytes)
 
-The motor usually sends this frame **twice** in quick succession after each status query. While a motor is running it has been observed not to answer status queries at all.
+The motor usually sends this frame **twice** in quick succession after each status query. While a motor is running it often does not answer status queries; when it does, the frame shows the intermediate position and the running flag.
 
 | Byte | Meaning |
 |------|---------|
@@ -280,20 +280,29 @@ The motor usually sends this frame **twice** in quick succession after each stat
 | 8 | Zone flags: bit 0 = motor running |
 | 9 | Checksum: XOR of bytes 1–8 |
 
-Example: `D8 02 01 00 00 18 00 00 00 1B` — motor 2, channel 1, position 0, idle.
+Example: `D8 02 01 00 00 18 00 00 00 1B` — motor 2, channel 1, position 0 (closed), idle.
+
+Observed on motor 1 (zone bit 1 is set after a move; its meaning is not confirmed):
+
+| Frame | State |
+|---|---|
+| `D8 01 01 00 00 18 00 64 02 7E` | Fully open: position 100, zone `0x02` |
+| `D8 01 01 00 26 18 65 39 03 61` | Moving: position 57, zone `0x03` (running) |
+| `D8 01 01 00 00 18 00 00 02 1A` | Fully closed: position 0, zone `0x02` |
 
 ### Position conventions
 
-Raw position 0 is open and 100 is closed. ESPHome uses `0.0 = closed` and
-`1.0 = open`, so the covers report `1 – (raw / 100)`.
+Raw position 0 is closed and 100 is open, confirmed on this installation in
+both end positions and while moving. ESPHome uses the
+same direction (`0.0 = closed`, `1.0 = open`), so the covers report
+`raw / 100` and position commands send `position × 100`.
 
 ### End limits
 
 Position feedback needs the motor's end limits to be set (see the motor's manual
 for the procedure with its remote). On motors without limits, observed on this
 installation before mounting, the position stays at 0 and the running flag at 0
-even after a move. Whether feedback works once the limits are set is still to be
-confirmed.
+even after a move. With the limits set (the mounted motors), feedback works.
 
 ---
 
@@ -502,7 +511,7 @@ Every motor gets a binary sensor `Awning N Online` (device class
   correct header, length and checksum (checked by the uartex hub) and the
   motor's own ID (checked by the cover's state filter).
 - It turns **off** only after **3 poll intervals** without a reply (90 s with
-  `poll_interval: 30s`). Motors do not answer while they are moving, so a
+  `poll_interval: 30s`). Motors often do not answer while they are moving, so a
   single missed poll is normal and must not mark a motor offline.
 - After a reboot it is off until the motor answers its first poll (at most
   one poll interval).
@@ -605,7 +614,7 @@ change `ESPHOME_VERSION` in the workflow together with the version under
 | Only `D8 00 …` replies | Motor not programmed, or factory-reset — see [Addressing motors](#addressing-motors-programming-ids-and-channels) |
 | A cover never updates | `motor_id` or channel bytes in the YAML don't match the motor |
 | Position always 0, running flag never set | End limits not set — see [End limits](#end-limits) |
-| No status replies while a motor moves | Observed behaviour: motors don't answer while running |
+| No status replies while a motor moves | Observed behaviour: motors often don't answer while running |
 | `Awning N Online` stays off | No valid reply from that motor: check wiring, `motor_id` and channel bytes, as for a cover that never updates |
 | `Awning N Last Seen` stays empty | No time yet: Home Assistant has not connected since the last reboot |
 | `RS485 Error` stays on an error | Disturbed frames: check A/B wiring, the 120R termination and that nothing else transmits on the bus |
@@ -653,6 +662,7 @@ Modified in October 2026. The full record is in the Git history; this is the sum
 - `secrets.yaml.example` gained `web_username`, `web_password` and `ap_password`, and a syntactically valid placeholder `api_key`.
 - Version 1.1.1: OTA uploads are encrypted with the API key instead of protected by `ota_password`, which is gone; see [Firmware updates (OTA)](#firmware-updates-ota).
 - Version 1.2.0: per-motor `Voltage` and `Last Seen` sensors, the `RS485 Error` sensor, and Home Assistant as time source; see [Voltage and last seen](#voltage-and-last-seen).
+- Version 1.2.1: raw position direction fixed (0 = closed, 100 = open) for feedback and position commands. Closed awnings had been shown as open after the next status poll; see [Position conventions](#position-conventions).
 
 **Documentation**
 
