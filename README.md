@@ -124,12 +124,21 @@ Each motor has two identical RJ12 sockets (daisy-chain in / out). Pin numbering 
 
 ### 3. Daisy-chaining motors
 
-Connect motors in a chain using standard RJ12 straight-through cables:
+Connect motors in a chain using RJ12 straight-through cables:
 
 ```
 Motor 1 ──RJ12── Motor 2 ──RJ12── Motor 3 ──RJ12── … ──RJ12── Motor N
     └─── RS485-A/B/GND wires to ESP32 RS485 converter
 ```
+
+> **Use only pins 1, 5 and 6 between motors.** A full 6-wire cable also links
+> the wired inputs DOWN/STOP/UP (pins 2–4). The motors then move together:
+> on this installation, with motors 1 and 2 linked by a 6-wire cable, each
+> remote channel moved both motors, while each motor alone only followed its
+> own channel. No frame appeared on the RS485 bus while this happened, so it
+> is the wired inputs, not the bus. Leave pins 2, 3 and 4 unconnected
+> (cut those three wires or crimp a cable with A, COM and B only) to keep the
+> motors independent. Keep pin 5 (COM): it gives the motors a common ground.
 
 Connect the converter to either the first or last motor in the chain. Terminate long runs (> 10 m) with a 120 Ω resistor across A and B. (Some TTL converters already have that resistor soldered on)
 
@@ -738,6 +747,7 @@ change `ESPHOME_VERSION` in the workflow together with the version under
 | `RS485 Error` stays on an error | Disturbed frames: check A/B wiring, the 120R termination and that nothing else transmits on the bus |
 | A cover shows "open" although its motor never answered | ESPHome covers have no "unknown" state; the cover keeps its start value until the first reply. Check `Awning N Online` |
 | OTA upload refused | The uploader's `api_key` differs from the one in the firmware; see [Firmware updates (OTA)](#firmware-updates-ota) |
+| A remote channel moves several motors | The motors are linked by a 6-wire RJ12 cable, which connects their wired inputs (pins 2–4); see [Daisy-chaining motors](#3-daisy-chaining-motors) |
 | `Program` refused: "no motor answered" | The motor is not connected, or it carries an ID/channel that is not in the configuration; see [Addressing motors](#addressing-motors-programming-ids-and-channels) |
 | `Program` refused: "2 motors" / "garbled replies" | Another motor is still on the bus; disconnect it, press `Scan Bus` to check |
 
