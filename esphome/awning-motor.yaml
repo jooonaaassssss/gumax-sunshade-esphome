@@ -116,11 +116,14 @@ packages:
 esphome:
   name: ${device_name}
   friendly_name: ${friendly_name}
+  # Reply decoding helpers (online detection, damaged replies).
+  includes:
+    - include/awning_frame.h
   # Reported to Home Assistant and shown in the device info.
   # Bump the version on every firmware-relevant change (README → Versioning).
   project:
     name: jooonaaassssss.gumax-sunshade-esphome
-    version: "1.3.0-beta.3"
+    version: "1.3.0-beta.4"
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -212,11 +215,10 @@ uart:
   baud_rate: 2400
   # Raw receive tap (ESPHome's UART debugger; the lambda is its only output).
   # Bytes without a gap of more than 8 ms form one burst, i.e. one reply.
-  # Every burst is logged at DEBUG, damaged ones included.  Its first bytes
-  # (0xd8, ID, CL, CH) survive even when later bytes of a reply are lost
-  # (README → Response frame), so they go to the bus_rx_listeners: the
-  # per-motor online sensors and the bus scan.  Position and voltage still
-  # come from valid frames only (uartex).
+  # Every burst is logged at DEBUG, damaged ones included, and passed to the
+  # bus_rx_listeners: per motor online detection, last seen and the position
+  # of damaged replies (include/awning_frame.h), and the bus scan.  Intact
+  # frames are decoded by uartex as before.
   debug:
     direction: RX
     dummy_receiver: false
@@ -225,15 +227,15 @@ uart:
     sequence:
       - lambda: |-
           ESP_LOGD("rs485", "RX %s", format_hex_pretty(bytes).c_str());
-          if (bytes.size() < 4 || bytes[0] != 0xd8) return;
-          const uint32_t key = (uint32_t(bytes[1]) << 16) | (uint32_t(bytes[2]) << 8) | bytes[3];
-          for (auto &listener : id(bus_rx_listeners)) listener(key);
+          uint32_t key;
+          if (!awning::reply_key(bytes, key)) return;
+          for (auto &listener : id(bus_rx_listeners)) listener(bytes);
 
 globals:
   # Registered at boot by packages/motor.yaml and packages/programming.yaml.
-  # Argument: (ID << 16) | (CL << 8) | CH of a reply burst.
+  # Argument: one reply burst starting with 0xd8 (see the uart: debug block).
   - id: bus_rx_listeners
-    type: std::vector<std::function<void(uint32_t)>>
+    type: std::vector<std::function<void(const std::vector<uint8_t> &)>>
 
 # ---------------------------------------------------------------------------
 # UARTEx hub – declarative RS485 frame parsing and command dispatch.

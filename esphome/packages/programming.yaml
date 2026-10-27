@@ -81,8 +81,9 @@ esphome:
         });
         // Reply bursts from the raw receive tap (main file): the first bytes
         // identify the motor even if later bytes of the reply are damaged.
-        id(bus_rx_listeners).push_back([](uint32_t key) {
-          if (!id(prog_collect)) return;
+        id(bus_rx_listeners).push_back([](const std::vector<uint8_t> &burst) {
+          uint32_t key;
+          if (!id(prog_collect) || !awning::reply_key(burst, key)) return;
           auto &seen = id(prog_seen);
           if (std::find(seen.begin(), seen.end(), key) == seen.end()) seen.push_back(key);
         });

@@ -38,8 +38,9 @@
 # watchdog script, even if later bytes of the reply are damaged.  The motor
 # counts as online while the script runs, i.e. until 3 poll intervals pass
 # without a reply.  Motors often do not answer while they are moving, so a
-# single missed poll is normal.  Position and voltage come from valid frames
-# only (uartex: header, length, checksum; ID state filter; plausibility).
+# single missed poll is normal.  Position and voltage come from intact
+# frames (uartex: header, length, checksum; ID state filter; plausibility)
+# and from damaged replies that include/awning_frame.h can still read.
 #
 # Last seen: the time of the latest reply (UTC, once ha_time is synced).
 # Published when the motor comes back online, then at most every 5 minutes
@@ -167,10 +168,27 @@ esphome:
         id(prog_motors).push_back((uint32_t(${motor_id}) << 16) |
                                   (uint32_t(${channel_l}) << 8) | uint32_t(${channel_h}));
         // Online and last seen: any reply that starts with this motor's ID
-        // and channel, even if later bytes are damaged (see header).
-        id(bus_rx_listeners).push_back([](uint32_t key) {
-          if (key != ((uint32_t(${motor_id}) << 16) | (uint32_t(${channel_l}) << 8) | uint32_t(${channel_h})))
+        // and channel, even if later bytes are damaged.  Position and
+        // voltage of a damaged reply: see include/awning_frame.h (intact
+        // frames go through uartex and state_position).
+        id(bus_rx_listeners).push_back([](const std::vector<uint8_t> &burst) {
+          uint32_t key;
+          if (!awning::reply_key(burst, key) ||
+              key != awning::make_key(${motor_id}, ${channel_l}, ${channel_h}))
             return;
+          awning::Status status;
+          if (awning::decode_damaged(burst, status)) {
+            ESP_LOGD("awning", "Motor ${motor_id}  pos=%d%%  running=%d  (damaged reply)",
+                     status.position, status.zone & 0x01);
+            auto *cover = id(awning_${motor_id});
+            const float position = status.position / 100.0f;
+            if (cover->position != position) {
+              cover->position = position;
+              cover->publish_state();
+            }
+            if (id(awning_${motor_id}_voltage).state != status.voltage)
+              id(awning_${motor_id}_voltage).publish_state(status.voltage);
+          }
           // stop() + execute() instead of mode: restart avoids a
           // "restarting" DEBUG line for every reply.
           const bool was_online = id(awning_${motor_id}_online_watchdog).is_running();

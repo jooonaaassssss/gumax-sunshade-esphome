@@ -99,6 +99,9 @@ The IDs were programmed one motor at a time with [tools/esp_probe.py](tools/esp_
 and each one verified by a status query. A motor that is factory-reset forgets
 its ID and has to be programmed again.
 
+Motors 1 and 2 are linked by a full 6-wire RJ12 cable on purpose, so each
+remote channel moves both (see [Daisy-chaining motors](#3-daisy-chaining-motors)).
+
 ---
 
 ## Hardware wiring
@@ -332,20 +335,32 @@ The motor usually sends this frame **twice**, back to back, after each status qu
 
 On this installation bytes of the reply are sometimes lost: the first copy
 breaks off after a few bytes and the second copy follows directly, or a single
-copy arrives with one byte missing. The loss depends on the content: with
-byte 5 = `0x18` (24 V, bits `00011000`) all replies were intact; with `0x17`
-(23 V, bits `11101000`) the `0x17` or the `0x00` before it went missing on
-every query, identically at 2350, 2400 and 2460 baud. Each reply is followed
-by `0x00` bytes, i.e. the receiver reads 0 once the motor stops sending.
-Together this points to a bus without fail-safe bias, see
-[Waveshare ESP32-S3-RS485-CAN](#4-waveshare-esp32-s3-rs485-can). The bundled
-uartex resynchronises on the second copy's header (see
-[uartex](#uartex-bundled-patched-copy)); a single damaged copy gives no
-position or voltage, but still counts for the online sensor and the bus scan,
-because its first bytes (`D8`, ID, channel) were intact in every case. A
-frame that lost a `0x00` byte can still pass the XOR checksum, shifted by one
-byte; the covers ignore frames with a voltage byte outside 16–40 or a position
-above 100.
+copy arrives with one byte missing. In every recorded case the lost byte was
+`b3` or the voltage byte (frame bytes 4–5); header, ID, channel, position,
+zone and checksum were intact. It started after days of error-free operation,
+with byte 5 = `0x17` (23 V) instead of `0x18` (24 V), and was identical at
+2350, 2400 and 2460 baud. Each reply is followed by `0x00` bytes, i.e. the
+receiver reads 0 once the motor stops sending, which points to a bus without
+fail-safe bias, see [Waveshare ESP32-S3-RS485-CAN](#4-waveshare-esp32-s3-rs485-can).
+
+How the firmware copes:
+
+- The bundled uartex resynchronises on the second copy's header (see
+  [uartex](#uartex-bundled-patched-copy)).
+- A single damaged copy still identifies the motor by its first bytes
+  (online sensor, last seen, bus scan).
+- Its position, zone and voltage are read by
+  [include/awning_frame.h](esphome/include/awning_frame.h): the checksum
+  gives the value of the lost byte, and the place of the voltage byte shows
+  whether the loss was before the position byte. Only then is the reply used;
+  a loss behind the voltage byte is ignored. In a simulation with one lost
+  byte at any position this gave no wrong value.
+- A frame that lost a `0x00` byte can pass the XOR checksum, shifted by one
+  byte; the covers ignore frames with a voltage byte outside 16–40 or a
+  position above 100 (and `awning_frame.h` reads them as damaged).
+
+Example: `D8 01 01 00 00 00 0F 02 1A` (the voltage `0x17` is missing) is read
+as motor 1, position 15 %, idle, 23 V.
 
 | Byte | Meaning |
 |------|---------|
@@ -392,6 +407,7 @@ even after a move. With the limits set (the mounted motors), feedback works.
 esphome/
 ├── awning-motor.yaml          # main file — board, substitutions, motor list
 ├── components/uartex/         # bundled, patched uartex (hub + cover)
+├── include/awning_frame.h     # reads motor replies, also damaged ones
 ├── packages/
 │   ├── motor.yaml             # template: cover + diagnostic sensors per motor
 │   ├── group.yaml             # template: all-awnings broadcast cover
@@ -608,8 +624,7 @@ Every motor gets a binary sensor `Awning N Online` (device class
   `awning-motor.yaml`) that starts with `D8`, the motor's ID and its channel
   bytes. The rest of the reply may be damaged; these first bytes survived in
   every damaged reply observed (see
-  [Response frame](#response-frame-motor--esp32-10-bytes)). Position and
-  voltage come from valid frames only.
+  [Response frame](#response-frame-motor--esp32-10-bytes)).
 - It turns **off** only after **3 poll intervals** without a reply (90 s with
   `poll_interval: 30s`). Motors often do not answer while they are moving, so a
   single missed poll is normal and must not mark a motor offline.
@@ -625,8 +640,9 @@ automatically.
 
 - `Awning N Voltage` shows byte 5 of the status frame in volts. `0x17`/`0x18`
   (23/24 V) have been observed; it is probably the motor's internal DC
-  supply, but this is not confirmed. The value is sent only when it changes,
-  and only from valid frames.
+  supply, but this is not confirmed. The value is sent only when it changes;
+  damaged replies count when their voltage byte can be identified (see
+  [Response frame](#response-frame-motor--esp32-10-bytes)).
 - `Awning N Last Seen` (device class `timestamp`) is the time of the motor's
   latest reply (as for the online sensor, damaged replies count). The clock comes from Home Assistant (`time: platform:
   homeassistant`), so the sensor stays empty until Home Assistant has
@@ -742,7 +758,7 @@ change `ESPHOME_VERSION` in the workflow together with the version under
 | Position always 0, running flag never set | End limits not set — see [End limits](#end-limits) |
 | No status replies while a motor moves | Observed behaviour: motors often don't answer while running |
 | `Awning N Online` stays off | No valid reply from that motor: check wiring, `motor_id` and channel bytes, as for a cover that never updates |
-| Position or voltage not updating although `Awning N Online` is on | Replies arrive damaged (the log shows `RX D8 …` with fewer than 10 bytes per copy); the online sensor counts them, position and voltage need a valid frame. Typically a bus without fail-safe bias, see [Waveshare ESP32-S3-RS485-CAN](#4-waveshare-esp32-s3-rs485-can). The cover keeps showing the last commanded position |
+| Position or voltage not updating although `Awning N Online` is on | Replies arrive damaged in a way [awning_frame.h](esphome/include/awning_frame.h) cannot read safely (the log shows `RX D8 …` lines without a following `pos=` line). See [Response frame](#response-frame-motor--esp32-10-bytes). The cover keeps showing the last known position |
 | `Awning N Last Seen` stays empty | No time yet: Home Assistant has not connected since the last reboot |
 | `RS485 Error` stays on an error | Disturbed frames: check A/B wiring, the 120R termination and that nothing else transmits on the bus |
 | A cover shows "open" although its motor never answered | ESPHome covers have no "unknown" state; the cover keeps its start value until the first reply. Check `Awning N Online` |
@@ -797,6 +813,7 @@ Modified in October 2026. The full record is in the Git history; this is the sum
 - Version 1.3.0-beta.1 also: `All Awnings` offers a position (slider in the web interface and Home Assistant). uartex only enables position support with a `state_position`; the broadcast cover now has one that returns its own optimistic position. Tested: all motors move to the commanded position.
 - Version 1.3.0-beta.2: bundled, patched uartex whose parser resynchronises on the next header, so the intact second copy of a damaged reply is used (tested: `Scan Bus` found a motor it had missed before); covers ignore implausible (byte-shifted) frames, which showed as `Voltage` 0 V. Not fixed: replies that arrive as a single copy with a missing byte are still lost, so `Awning N Online` can stay off while the motor obeys commands. An earlier note that programmed motors ignore the broadcast status query was wrong: their replies had been lost the same way.
 - Version 1.3.0-beta.3: raw receive tap (`uart:` `debug:` block) that logs every reply, damaged ones included. `Awning N Online`, `Last Seen` and the bus scan now recognise a motor by the first bytes of its reply (`D8`, ID, channel), which survive the damage; position and voltage still come from valid frames only. Tested: `Awning 1 Online` on and `Scan Bus` finds the motor while most of its replies are damaged. A tried repair of damaged frames from the checksum was dropped: in a simulation it showed wrong values in about a quarter of the cases.
+- Version 1.3.0-beta.4: position, zone and voltage are also read from damaged replies ([include/awning_frame.h](esphome/include/awning_frame.h)), anchored at the intact end of the frame and only when the voltage byte shows that the lost byte was before the position. This replaces the dropped repair: in a simulation with one lost byte at any position it gave no wrong value. Tested: after moving both awnings with the remote, both covers showed the new position (15 %) from damaged replies. Moves by remote were reported by the motors all along; only the damaged replies hid them.
 
 **Documentation**
 
