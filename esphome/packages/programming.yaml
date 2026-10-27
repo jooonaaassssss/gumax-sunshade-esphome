@@ -17,15 +17,19 @@
 # new ID and channel, so only the motor to program may be on the bus.
 # prog_run checks that first.  The scan sends the broadcast status query
 # (ID 0) and one status query per configured motor, so a motor is found even
-# if its reply to one of the queries is lost.  Programming is only allowed
-# when exactly one motor answered and no frame was garbled.  Afterwards
-# prog_run queries the new ID to confirm.
+# if its reply to one of the queries is lost.  Replies are identified by
+# their first bytes (0xd8, ID, CL, CH), which survive even when later bytes
+# are damaged.  Programming is only allowed when exactly one motor answered
+# and no frame was garbled.  Afterwards prog_run queries the new ID to
+# confirm.
 #
-# Limitation: a programmed motor whose ID/channel is not in this
-# configuration is only found through the broadcast query.
+# Limitations: a programmed motor whose ID/channel is not in this
+# configuration is only found through the broadcast query.  Two motors with
+# the same ID and channel (e.g. two factory-reset motors) answer at the same
+# time and may look like one, so connecting only one motor stays the rule.
 #
-# Needs the uartex hub id uartex_hub and the web_server sorting group
-# sg_programming from the main file.
+# Needs the uartex hub id uartex_hub, the global bus_rx_listeners and the
+# web_server sorting group sg_programming from the main file.
 # ===========================================================================
 
 globals:
@@ -75,11 +79,10 @@ esphome:
           id(prog_written) = true;
           id(prog_collect) = true;
         });
-        // Only valid frames (header, length, checksum) reach this callback.
-        id(uartex_hub).add_on_read_callback([](const uint8_t *data, const uint16_t len) {
-          if (!id(prog_collect) || len < 4) return;
-          // data = 0xd8 header, ID, CL, CH, ...
-          const uint32_t key = (uint32_t(data[1]) << 16) | (uint32_t(data[2]) << 8) | data[3];
+        // Reply bursts from the raw receive tap (main file): the first bytes
+        // identify the motor even if later bytes of the reply are damaged.
+        id(bus_rx_listeners).push_back([](uint32_t key) {
+          if (!id(prog_collect)) return;
           auto &seen = id(prog_seen);
           if (std::find(seen.begin(), seen.end(), key) == seen.end()) seen.push_back(key);
         });

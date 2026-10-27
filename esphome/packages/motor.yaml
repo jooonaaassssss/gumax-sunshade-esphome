@@ -26,22 +26,25 @@
 #   • globals:        awning_${motor_id}_last_seen_ts  (internal, UTC epoch)
 #
 # The Program button and the boot registration need
-# packages/programming.yaml (script prog_run, global prog_motors).
+# packages/programming.yaml (script prog_run, global prog_motors), the
+# online detection needs bus_rx_listeners from the main file.
 #
 # The uartex hub (defined in the main file) dispatches incoming RX frames to
 # each cover entity via the motor-ID state filter.  Polling is handled by
 # command_update fired every ${poll_interval}.
 #
-# Online detection: every valid status frame from this motor (header,
-# length and checksum checked by the hub, ID checked by the state filter)
-# restarts the watchdog script.  The motor counts as online while the
-# script runs, i.e. until 3 poll intervals pass without a reply.  Motors
-# often do not answer while they are moving, so a single missed poll is normal.
+# Online detection: every reply burst from the raw receive tap in the main
+# file whose first bytes are 0xd8, this motor's ID and channel restarts the
+# watchdog script, even if later bytes of the reply are damaged.  The motor
+# counts as online while the script runs, i.e. until 3 poll intervals pass
+# without a reply.  Motors often do not answer while they are moving, so a
+# single missed poll is normal.  Position and voltage come from valid frames
+# only (uartex: header, length, checksum; ID state filter; plausibility).
 #
-# Last seen: the time of the latest frame (UTC, once ha_time is synced).
+# Last seen: the time of the latest reply (UTC, once ha_time is synced).
 # Published when the motor comes back online, then at most every 5 minutes
 # to keep the Home Assistant history small, and with the exact time of the
-# last frame when the motor goes offline.
+# last reply when the motor goes offline.
 # ===========================================================================
 
 cover:
@@ -80,21 +83,6 @@ cover:
       // Supply voltage (byte [4], meaning not confirmed): publish on change.
       if (id(awning_${motor_id}_voltage).state != data[4])
         id(awning_${motor_id}_voltage).publish_state(data[4]);
-      // Restart the online watchdog.  stop() + execute() instead of relying
-      // on mode: restart avoids a "restarting" DEBUG line for every frame.
-      const bool was_online = id(awning_${motor_id}_online_watchdog).is_running();
-      id(awning_${motor_id}_online_watchdog).stop();
-      id(awning_${motor_id}_online_watchdog).execute();
-      // Last seen (see header).
-      auto now = id(ha_time).utcnow();
-      if (now.is_valid()) {
-        static time_t published = 0;
-        id(awning_${motor_id}_last_seen_ts) = now.timestamp;
-        if (!was_online || now.timestamp - published >= 300) {
-          published = now.timestamp;
-          id(awning_${motor_id}_last_seen).publish_state(now.strftime("%Y-%m-%dT%H:%M:%SZ"));
-        }
-      }
       return data[6] / 100.0f;
     #
     # TX payload bytes (uartex auto-prepends 0x9a header, appends XOR checksum):
@@ -113,7 +101,7 @@ cover:
     update_interval: ${poll_interval}
 
 script:
-  # Restarted by every status frame; runs out after 3 poll intervals of silence.
+  # Restarted by every reply; runs out after 3 poll intervals of silence.
   - id: awning_${motor_id}_online_watchdog
     mode: restart
     then:
@@ -178,6 +166,26 @@ esphome:
     - lambda: |-
         id(prog_motors).push_back((uint32_t(${motor_id}) << 16) |
                                   (uint32_t(${channel_l}) << 8) | uint32_t(${channel_h}));
+        // Online and last seen: any reply that starts with this motor's ID
+        // and channel, even if later bytes are damaged (see header).
+        id(bus_rx_listeners).push_back([](uint32_t key) {
+          if (key != ((uint32_t(${motor_id}) << 16) | (uint32_t(${channel_l}) << 8) | uint32_t(${channel_h})))
+            return;
+          // stop() + execute() instead of mode: restart avoids a
+          // "restarting" DEBUG line for every reply.
+          const bool was_online = id(awning_${motor_id}_online_watchdog).is_running();
+          id(awning_${motor_id}_online_watchdog).stop();
+          id(awning_${motor_id}_online_watchdog).execute();
+          auto now = id(ha_time).utcnow();
+          if (now.is_valid()) {
+            static time_t published = 0;
+            id(awning_${motor_id}_last_seen_ts) = now.timestamp;
+            if (!was_online || now.timestamp - published >= 300) {
+              published = now.timestamp;
+              id(awning_${motor_id}_last_seen).publish_state(now.strftime("%Y-%m-%dT%H:%M:%SZ"));
+            }
+          }
+        });
 
 button:
   - platform: template

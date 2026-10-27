@@ -120,7 +120,7 @@ esphome:
   # Bump the version on every firmware-relevant change (README → Versioning).
   project:
     name: jooonaaassssss.gumax-sunshade-esphome
-    version: "1.3.0-beta.2"
+    version: "1.3.0-beta.3"
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -210,6 +210,30 @@ uart:
   tx_pin: ${uart_tx_pin}
   flow_control_pin: ${uart_flow_control_pin}
   baud_rate: 2400
+  # Raw receive tap (ESPHome's UART debugger; the lambda is its only output).
+  # Bytes without a gap of more than 8 ms form one burst, i.e. one reply.
+  # Every burst is logged at DEBUG, damaged ones included.  Its first bytes
+  # (0xd8, ID, CL, CH) survive even when later bytes of a reply are lost
+  # (README → Response frame), so they go to the bus_rx_listeners: the
+  # per-motor online sensors and the bus scan.  Position and voltage still
+  # come from valid frames only (uartex).
+  debug:
+    direction: RX
+    dummy_receiver: false
+    after:
+      timeout: 8ms
+    sequence:
+      - lambda: |-
+          ESP_LOGD("rs485", "RX %s", format_hex_pretty(bytes).c_str());
+          if (bytes.size() < 4 || bytes[0] != 0xd8) return;
+          const uint32_t key = (uint32_t(bytes[1]) << 16) | (uint32_t(bytes[2]) << 8) | bytes[3];
+          for (auto &listener : id(bus_rx_listeners)) listener(key);
+
+globals:
+  # Registered at boot by packages/motor.yaml and packages/programming.yaml.
+  # Argument: (ID << 16) | (CL << 8) | CH of a reply burst.
+  - id: bus_rx_listeners
+    type: std::vector<std::function<void(uint32_t)>>
 
 # ---------------------------------------------------------------------------
 # UARTEx hub – declarative RS485 frame parsing and command dispatch.
@@ -233,12 +257,7 @@ uartex:
   tx_checksum: xor_no_header
   tx_delay: 1500ms          # inter-command gap; gives each motor time to respond
   rx_priority: loop         # non-blocking RX; keeps the main loop responsive
-  # Log every received frame at DEBUG (uartex itself only logs RX at VERBOSE;
-  # TX is already logged at DEBUG).  This includes replies no cover listens
-  # to, e.g. an unprogrammed motor answering as ID 0.  Used when addressing
-  # motors and by tools/esp_probe.py.
-  on_read:
-    - lambda: 'ESP_LOGD("rs485", "RX %s", format_hex_pretty(data, len).c_str());'
+  # Every reply is logged by the raw receive tap in the uart: block.
   # Result of the last received frame: "None" or e.g. "Checksum Error".
   # Published only when it changes.
   error:

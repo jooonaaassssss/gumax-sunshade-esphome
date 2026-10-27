@@ -22,7 +22,7 @@ under the same licence, the MIT License. See [Fork history](#fork-history),
 - **All-awnings broadcast** cover — open/close/stop/position all motors with one command
 - **RS485 Raw Command** text entity to send any frame from Home Assistant (motor addressing, debugging)
 - **Motor programming from the UI**: one `Program` button per motor, guarded by a bus scan and a self-expiring `Programming Mode`, see [Addressing motors](#addressing-motors-programming-ids-and-channels)
-- Every received RS485 frame is logged at `DEBUG` level
+- Every RS485 reply is logged at `DEBUG` level, damaged ones included
 - **Web interface** built into the firmware (ESPHome `web_server` v3, password-protected) — works without Home Assistant, see [Web interface](#web-interface)
 - **Online, voltage and last-seen sensors per motor**, an **RS485 error** sensor, a **fallback access point** with captive portal, and diagnostic entities (WiFi signal, uptime, IP, ESPHome version, restart / safe mode)
 - Plain ESPHome YAML on top of the [uartex](https://github.com/eigger/espcomponents) external component
@@ -145,20 +145,23 @@ the board and already set in the YAML:
 | Driver enable (DE/RE) | GPIO21 | `uart_flow_control_pin` |
 
 Connect the board's RS485 **A** terminal to motor pin 1 and **B** to motor pin 6.
-If the terminal block has an RS485 ground, connect it to motor pin 5.
+The board's RS485 terminal has no ground terminal (A and B only), so motor
+pin 5 stays unconnected.
 
 - Power the board either from its terminal block or from USB-C, never from both at the same time (Waveshare FAQ).
 - The 120R termination jumper is open by default. Bus runs of a few metres
   do not need termination.
-- **Idle level (fail-safe bias)**: when no device drives the bus, A must sit
-  above B so that the receiver reads 1. Without bias resistors the idle bus
-  floats; the receiver then reads `0x00` bytes after every reply and loses
-  bytes that start with several 1 bits (observed here, see
+- **Idle level (fail-safe bias)**: when no device drives the bus, A should
+  sit above B so that the receiver reads 1. Without bias the idle bus
+  floats; the receiver then reads `0x00` bytes after every reply and can
+  lose bytes that start with several 1 bits (observed here after days of
+  error-free operation, see
   [Response frame](#response-frame-motor--esp32-10-bytes)). A 120R
-  termination without bias makes this worse, because it pulls A and B
-  together. Remedy: termination off, and bias resistors at one point of the
-  bus (typically 560 Ω–1 kΩ from A to +5 V and from B to GND of the bus side,
-  i.e. the isolated side of this board).
+  termination without bias makes this worse. The firmware copes for the
+  online sensors and programming; position and voltage need intact replies.
+  Bias resistors (560 Ω–1 kΩ from A to +5 V and from B to GND of the bus
+  side) would fix it electrically, but this board has no terminal for the
+  bus-side supply.
 - Logs are available on the USB-C port (`USB_SERIAL_JTAG`) and over Wi-Fi.
 
 ### 5. Other boards
@@ -235,7 +238,9 @@ nothing has to be looked up.
 2. Connect **only** the motor to be programmed to the bus.
 3. Press its button, e.g. **`Awning 3 Program`**. The firmware
    - scans the bus: the broadcast status query and one status query per
-     configured motor (a reply lost on one query is caught by another),
+     configured motor (a reply lost on one query is caught by another);
+     replies count by their first bytes (`D8`, ID, channel), so damaged
+     replies still identify the motor,
    - refuses unless exactly one motor answered and no frame was garbled,
    - sends the programming frame (the motor blinks blue three times),
    - queries the new ID and channel to confirm.
@@ -244,13 +249,17 @@ nothing has to be looked up.
    `Refused (2 motors: ID 1 / channel 1, ID 2 / channel 1). Connect only the motor to program.`
 5. Connect the next motor and continue with step 3.
 
+The scan is a safety net, not a guarantee: two motors with the same ID and
+channel, e.g. two factory-reset motors, answer at the same moment and can
+look like one. Connecting only the motor to be programmed stays the rule.
+
 **`Scan Bus`** runs the same scan without programming and works without
 Programming Mode, e.g. `Scan: 1 motor: ID 0 (unprogrammed)`.
 
 If Program is refused with "no motor answered" although the motor is
-connected, its replies were lost on the bus (see
-[Troubleshooting](#troubleshooting)); press `Scan Bus` a few times, or program
-it with the raw frames below.
+connected, press `Scan Bus` and check the log for `RX D8 …` lines; no reply
+at all points to wiring, `uart_flow_control_pin` or a motor without power.
+As a last resort program it with the raw frames below.
 
 **Procedure with raw frames** (used for [this installation](#this-installation)):
 
@@ -322,7 +331,9 @@ by `0x00` bytes, i.e. the receiver reads 0 once the motor stops sending.
 Together this points to a bus without fail-safe bias, see
 [Waveshare ESP32-S3-RS485-CAN](#4-waveshare-esp32-s3-rs485-can). The bundled
 uartex resynchronises on the second copy's header (see
-[uartex](#uartex-bundled-patched-copy)); a single damaged copy is lost. A
+[uartex](#uartex-bundled-patched-copy)); a single damaged copy gives no
+position or voltage, but still counts for the online sensor and the bus scan,
+because its first bytes (`D8`, ID, channel) were intact in every case. A
 frame that lost a `0x00` byte can still pass the XOR checksum, shifted by one
 byte; the covers ignore frames with a voltage byte outside 16–40 or a position
 above 100.
@@ -583,27 +594,32 @@ access point or a hidden SSID.
 Every motor gets a binary sensor `Awning N Online` (device class
 `connectivity`, category diagnostic), generated by `packages/motor.yaml`.
 
-- It turns **on** as soon as a valid status frame from that motor arrives:
-  correct header, length and checksum (checked by the uartex hub) and the
-  motor's own ID (checked by the cover's state filter).
+- It turns **on** as soon as a reply from that motor arrives: a burst of
+  bytes from the raw receive tap (the `debug:` block of `uart:` in
+  `awning-motor.yaml`) that starts with `D8`, the motor's ID and its channel
+  bytes. The rest of the reply may be damaged; these first bytes survived in
+  every damaged reply observed (see
+  [Response frame](#response-frame-motor--esp32-10-bytes)). Position and
+  voltage come from valid frames only.
 - It turns **off** only after **3 poll intervals** without a reply (90 s with
   `poll_interval: 30s`). Motors often do not answer while they are moving, so a
   single missed poll is normal and must not mark a motor offline.
 - After a reboot it is off until the motor answers its first poll (at most
   one poll interval).
 
-Each valid frame restarts an internal script (`awning_N_online_watchdog`,
-`mode: restart`) that waits 3 × the cover's update interval; the sensor
-reports whether that script is still running. The timeout therefore follows
-`poll_interval` automatically.
+Each reply restarts an internal script (`awning_N_online_watchdog`) that
+waits 3 × the cover's update interval; the sensor reports whether that
+script is still running. The timeout therefore follows `poll_interval`
+automatically.
 
 ### Voltage and last seen
 
 - `Awning N Voltage` shows byte 5 of the status frame in volts. `0x17`/`0x18`
   (23/24 V) have been observed; it is probably the motor's internal DC
-  supply, but this is not confirmed. The value is sent only when it changes.
+  supply, but this is not confirmed. The value is sent only when it changes,
+  and only from valid frames.
 - `Awning N Last Seen` (device class `timestamp`) is the time of the motor's
-  latest valid reply. The clock comes from Home Assistant (`time: platform:
+  latest reply (as for the online sensor, damaged replies count). The clock comes from Home Assistant (`time: platform:
   homeassistant`), so the sensor stays empty until Home Assistant has
   connected once after a reboot. To keep the history small it is updated
   when the motor comes back online and then at most every 5 minutes; when the
@@ -717,8 +733,7 @@ change `ESPHOME_VERSION` in the workflow together with the version under
 | Position always 0, running flag never set | End limits not set — see [End limits](#end-limits) |
 | No status replies while a motor moves | Observed behaviour: motors often don't answer while running |
 | `Awning N Online` stays off | No valid reply from that motor: check wiring, `motor_id` and channel bytes, as for a cover that never updates |
-| `Awning N Online` off or flapping although the motor obeys commands | Replies are damaged (lost bytes; uartex drops such frames without an `RS485 Error`), typically a bus without fail-safe bias, see [Waveshare ESP32-S3-RS485-CAN](#4-waveshare-esp32-s3-rs485-can). Check the RS485 ground to motor pin 5, the 120R jumper (off) and the connectors. For a raw byte log add `debug:` to the `uart:` block (ESPHome [UART debugging](https://esphome.io/components/uart/#debugging)) |
-| `Program` refused although only one motor is connected | Same cause: its replies are damaged, so the firmware cannot verify that only one motor is on the bus and refuses on purpose |
+| Position or voltage not updating although `Awning N Online` is on | Replies arrive damaged (the log shows `RX D8 …` with fewer than 10 bytes per copy); the online sensor counts them, position and voltage need a valid frame. Typically a bus without fail-safe bias, see [Waveshare ESP32-S3-RS485-CAN](#4-waveshare-esp32-s3-rs485-can). The cover keeps showing the last commanded position |
 | `Awning N Last Seen` stays empty | No time yet: Home Assistant has not connected since the last reboot |
 | `RS485 Error` stays on an error | Disturbed frames: check A/B wiring, the 120R termination and that nothing else transmits on the bus |
 | A cover shows "open" although its motor never answered | ESPHome covers have no "unknown" state; the cover keeps its start value until the first reply. Check `Awning N Online` |
@@ -771,6 +786,7 @@ Modified in October 2026. The full record is in the Git history; this is the sum
 - Version 1.3.0-beta.1: motor programming from the web interface and Home Assistant (`Programming Mode`, `Scan Bus`, `Programming Status`, one `Awning N Program` button per motor) in the new `packages/programming.yaml`; see [Addressing motors](#addressing-motors-programming-ids-and-channels). Beta: scan and refusals tested, the programming run itself not yet.
 - Version 1.3.0-beta.1 also: `All Awnings` offers a position (slider in the web interface and Home Assistant). uartex only enables position support with a `state_position`; the broadcast cover now has one that returns its own optimistic position. Tested: all motors move to the commanded position.
 - Version 1.3.0-beta.2: bundled, patched uartex whose parser resynchronises on the next header, so the intact second copy of a damaged reply is used (tested: `Scan Bus` found a motor it had missed before); covers ignore implausible (byte-shifted) frames, which showed as `Voltage` 0 V. Not fixed: replies that arrive as a single copy with a missing byte are still lost, so `Awning N Online` can stay off while the motor obeys commands. An earlier note that programmed motors ignore the broadcast status query was wrong: their replies had been lost the same way.
+- Version 1.3.0-beta.3: raw receive tap (`uart:` `debug:` block) that logs every reply, damaged ones included. `Awning N Online`, `Last Seen` and the bus scan now recognise a motor by the first bytes of its reply (`D8`, ID, channel), which survive the damage; position and voltage still come from valid frames only. Tested: `Awning 1 Online` on and `Scan Bus` finds the motor while most of its replies are damaged. A tried repair of damaged frames from the checksum was dropped: in a simulation it showed wrong values in about a quarter of the cases.
 
 **Documentation**
 
