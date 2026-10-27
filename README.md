@@ -237,9 +237,6 @@ Each motor must be programmed with a unique **ID** (0x01–0xFF in hex) and a **
 
 **From the web interface or Home Assistant** (recommended):
 
-> **Beta (1.3.0-beta.1):** the scan and the refusals are tested on hardware;
-> programming a motor and the confirmation are not tested yet.
-
 The **Programming** group of the web interface, and the Configuration section of
 the device page in Home Assistant, hold a `Program` button per configured motor.
 The button programs the ID and channel from that motor's package entry, so
@@ -791,13 +788,13 @@ Modified in October 2026. The full record is in the Git history; this is the sum
 **Configuration**
 
 - Five motors instead of eight: IDs 1–4 on channel 1, ID 5 on channel 2. The motors are programmed to match, see [This installation](#this-installation).
-- uartex pinned to tag `v260904` instead of `@latest` with `refresh: always`, so a rebuild produces the same firmware. Since 1.3.0-beta.2 a patched copy of that tag is bundled instead, see [uartex](#uartex-bundled-patched-copy).
+- uartex pinned to tag `v260904` instead of `@latest` with `refresh: always`, so a rebuild produces the same firmware. Since 1.3.0 a patched copy of that tag is bundled instead, see [uartex](#uartex-bundled-patched-copy).
 - `rx_priority: loop`: receiving no longer blocks the ESPHome main loop, which had produced "took a long time" warnings.
 - Every received frame is logged at `DEBUG`, including replies no cover listens to (an unprogrammed motor answering as ID 0). The per-motor decode log moved from `INFO` to `DEBUG`.
 - `poll_interval` now takes effect: a package default in `motor.yaml` shadowed the value from the main file.
 - The package templates no longer have defaults for required values, so a missing `motor_id` fails the build instead of silently creating `awning_1`. The broadcast cover no longer takes channel vars the motors ignore.
 
-**Web interface and operation (versions 1.1.0 to 1.2.0)**
+**Web interface and operation (versions 1.1.0 to 1.3.0)**
 
 - ESPHome web interface (`web_server` v3, local, Digest login, web OTA disabled) with the groups Awnings, Service and Diagnostics; see [Web interface](#web-interface).
 - New per-motor online sensors, implemented in `packages/motor.yaml` with a watchdog script; see [Online sensors](#online-sensors).
@@ -809,11 +806,14 @@ Modified in October 2026. The full record is in the Git history; this is the sum
 - Version 1.1.1: OTA uploads are encrypted with the API key instead of protected by `ota_password`, which is gone; see [Firmware updates (OTA)](#firmware-updates-ota).
 - Version 1.2.0: per-motor `Voltage` and `Last Seen` sensors, the `RS485 Error` sensor, and Home Assistant as time source; see [Voltage and last seen](#voltage-and-last-seen).
 - Version 1.2.1: raw position direction fixed (0 = closed, 100 = open) for feedback and position commands. Closed awnings had been shown as open after the next status poll; see [Position conventions](#position-conventions).
-- Version 1.3.0-beta.1: motor programming from the web interface and Home Assistant (`Programming Mode`, `Scan Bus`, `Programming Status`, one `Awning N Program` button per motor) in the new `packages/programming.yaml`; see [Addressing motors](#addressing-motors-programming-ids-and-channels). Beta: scan and refusals tested, the programming run itself not yet.
-- Version 1.3.0-beta.1 also: `All Awnings` offers a position (slider in the web interface and Home Assistant). uartex only enables position support with a `state_position`; the broadcast cover now has one that returns its own optimistic position. Tested: all motors move to the commanded position.
-- Version 1.3.0-beta.2: bundled, patched uartex whose parser resynchronises on the next header, so the intact second copy of a damaged reply is used (tested: `Scan Bus` found a motor it had missed before); covers ignore implausible (byte-shifted) frames, which showed as `Voltage` 0 V. Not fixed: replies that arrive as a single copy with a missing byte are still lost, so `Awning N Online` can stay off while the motor obeys commands. An earlier note that programmed motors ignore the broadcast status query was wrong: their replies had been lost the same way.
-- Version 1.3.0-beta.3: raw receive tap (`uart:` `debug:` block) that logs every reply, damaged ones included. `Awning N Online`, `Last Seen` and the bus scan now recognise a motor by the first bytes of its reply (`D8`, ID, channel), which survive the damage; position and voltage still come from valid frames only. Tested: `Awning 1 Online` on and `Scan Bus` finds the motor while most of its replies are damaged. A tried repair of damaged frames from the checksum was dropped: in a simulation it showed wrong values in about a quarter of the cases.
-- Version 1.3.0-beta.4: position, zone and voltage are also read from damaged replies ([include/awning_frame.h](esphome/include/awning_frame.h)), anchored at the intact end of the frame and only when the voltage byte shows that the lost byte was before the position. This replaces the dropped repair: in a simulation with one lost byte at any position it gave no wrong value. Tested: after moving both awnings with the remote, both covers showed the new position (15 %) from damaged replies. Moves by remote were reported by the motors all along; only the damaged replies hid them.
+- Version 1.3.0 (tested on this installation; developed as 1.3.0-beta.1 to beta.4):
+  - Motor programming from the web interface and Home Assistant (`Programming Mode`, `Scan Bus`, `Programming Status`, one `Awning N Program` button per motor) in the new `packages/programming.yaml`; see [Addressing motors](#addressing-motors-programming-ids-and-channels).
+  - `All Awnings` offers a position (slider in the web interface and Home Assistant). uartex only enables position support with a `state_position`; the broadcast cover now has one that returns its own optimistic position.
+  - Bundled, patched uartex whose parser resynchronises on the next header, so the intact second copy of a damaged reply is used; see [uartex](#uartex-bundled-patched-copy).
+  - Raw receive tap (`uart:` `debug:` block) that logs every reply, damaged ones included. `Awning N Online`, `Last Seen` and the bus scan recognise a motor by the first bytes of its reply (`D8`, ID, channel).
+  - Position, zone and voltage are also read from damaged replies ([include/awning_frame.h](esphome/include/awning_frame.h)), anchored at the intact end of the frame and only when the voltage byte shows that the lost byte was before the position; byte-shifted frames are ignored. Moves by remote were reported by the motors all along; only the damaged replies hid them. See [Response frame](#response-frame-motor--esp32-10-bytes).
+  - Dropped on the way: a repair that inserted the lost byte from the checksum (wrong values in about a quarter of the cases in a simulation).
+  - Corrected: programmed motors do answer the broadcast status query (their replies had been lost); a 6-wire RJ12 cable between motors couples them through the wired inputs (see [Daisy-chaining motors](#3-daisy-chaining-motors)).
 
 **Documentation**
 
