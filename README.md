@@ -148,7 +148,17 @@ Connect the board's RS485 **A** terminal to motor pin 1 and **B** to motor pin 6
 If the terminal block has an RS485 ground, connect it to motor pin 5.
 
 - Power the board either from its terminal block or from USB-C, never from both at the same time (Waveshare FAQ).
-- If communication is unreliable, move the board's termination jumper to **120R**.
+- The 120R termination jumper is open by default. Bus runs of a few metres
+  do not need termination.
+- **Idle level (fail-safe bias)**: when no device drives the bus, A must sit
+  above B so that the receiver reads 1. Without bias resistors the idle bus
+  floats; the receiver then reads `0x00` bytes after every reply and loses
+  bytes that start with several 1 bits (observed here, see
+  [Response frame](#response-frame-motor--esp32-10-bytes)). A 120R
+  termination without bias makes this worse, because it pulls A and B
+  together. Remedy: termination off, and bias resistors at one point of the
+  bus (typically 560 Ω–1 kΩ from A to +5 V and from B to GND of the bus side,
+  i.e. the isolated side of this board).
 - Logs are available on the USB-C port (`USB_SERIAL_JTAG`) and over Wi-Fi.
 
 ### 5. Other boards
@@ -304,12 +314,14 @@ The motor usually sends this frame **twice**, back to back, after each status qu
 
 On this installation bytes of the reply are sometimes lost: the first copy
 breaks off after a few bytes and the second copy follows directly, or a single
-copy arrives with one byte missing (the checksum still covers the missing
-byte, so the frame fails). The loss depends on the content: with byte 5 =
-`0x18` (24 V) all replies were intact; with `0x17` (23 V) the `0x17` or the
-`0x00` before it went missing on every query, identically at 2350, 2400 and
-2460 baud, so the motor probably sends the frame that way. The bundled uartex
-resynchronises on the second copy's header (see
+copy arrives with one byte missing. The loss depends on the content: with
+byte 5 = `0x18` (24 V, bits `00011000`) all replies were intact; with `0x17`
+(23 V, bits `11101000`) the `0x17` or the `0x00` before it went missing on
+every query, identically at 2350, 2400 and 2460 baud. Each reply is followed
+by `0x00` bytes, i.e. the receiver reads 0 once the motor stops sending.
+Together this points to a bus without fail-safe bias, see
+[Waveshare ESP32-S3-RS485-CAN](#4-waveshare-esp32-s3-rs485-can). The bundled
+uartex resynchronises on the second copy's header (see
 [uartex](#uartex-bundled-patched-copy)); a single damaged copy is lost. A
 frame that lost a `0x00` byte can still pass the XOR checksum, shifted by one
 byte; the covers ignore frames with a voltage byte outside 16–40 or a position
@@ -705,7 +717,8 @@ change `ESPHOME_VERSION` in the workflow together with the version under
 | Position always 0, running flag never set | End limits not set — see [End limits](#end-limits) |
 | No status replies while a motor moves | Observed behaviour: motors often don't answer while running |
 | `Awning N Online` stays off | No valid reply from that motor: check wiring, `motor_id` and channel bytes, as for a cover that never updates |
-| `Awning N Online` off or flapping although the motor obeys commands | Replies are damaged (lost bytes; uartex drops such frames without an `RS485 Error`), see [Response frame](#response-frame-motor--esp32-10-bytes). Check the RS485 ground to motor pin 5, the connectors (moisture) and the 120R jumper. For a raw byte log add `debug:` to the `uart:` block (ESPHome [UART debugging](https://esphome.io/components/uart/#debugging)) |
+| `Awning N Online` off or flapping although the motor obeys commands | Replies are damaged (lost bytes; uartex drops such frames without an `RS485 Error`), typically a bus without fail-safe bias, see [Waveshare ESP32-S3-RS485-CAN](#4-waveshare-esp32-s3-rs485-can). Check the RS485 ground to motor pin 5, the 120R jumper (off) and the connectors. For a raw byte log add `debug:` to the `uart:` block (ESPHome [UART debugging](https://esphome.io/components/uart/#debugging)) |
+| `Program` refused although only one motor is connected | Same cause: its replies are damaged, so the firmware cannot verify that only one motor is on the bus and refuses on purpose |
 | `Awning N Last Seen` stays empty | No time yet: Home Assistant has not connected since the last reboot |
 | `RS485 Error` stays on an error | Disturbed frames: check A/B wiring, the 120R termination and that nothing else transmits on the bus |
 | A cover shows "open" although its motor never answered | ESPHome covers have no "unknown" state; the cover keeps its start value until the first reply. Check `Awning N Online` |
