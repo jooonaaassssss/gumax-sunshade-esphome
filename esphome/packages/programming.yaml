@@ -15,15 +15,14 @@
 #
 # Every motor that hears a programming frame (ID CL CH aa aa) takes over the
 # new ID and channel, so only the motor to program may be on the bus.
-# prog_run checks that first.  Programmed motors only answer a status query
-# for their own ID and channel; the broadcast query (ID 0) is only answered
-# by unprogrammed motors.  The scan therefore sends the broadcast query and
-# one query per configured motor, and programming is only allowed when
-# exactly one motor answered and no frame was garbled.  Afterwards prog_run
-# queries the new ID to confirm.
+# prog_run checks that first.  The scan sends the broadcast status query
+# (ID 0) and one status query per configured motor, so a motor is found even
+# if its reply to one of the queries is lost.  Programming is only allowed
+# when exactly one motor answered and no frame was garbled.  Afterwards
+# prog_run queries the new ID to confirm.
 #
-# Limitation: a motor programmed with an ID/channel that is not in this
-# configuration answers none of these queries and cannot be detected.
+# Limitation: a programmed motor whose ID/channel is not in this
+# configuration is only found through the broadcast query.
 #
 # Needs the uartex hub id uartex_hub and the web_server sorting group
 # sg_programming from the main file.
@@ -214,8 +213,8 @@ script:
                 id(prog_seen).clear();
                 id(prog_errors) = 0;
                 id(prog_unsent) = 0;
-            # Iteration 0: broadcast query (unprogrammed motors).  Then one
-            # query per configured motor.
+            # Iteration 0: broadcast query (every motor).  Then one query per
+            # configured motor.
             - repeat:
                 count: !lambda "return id(prog_motors).size() + 1;"
                 then:

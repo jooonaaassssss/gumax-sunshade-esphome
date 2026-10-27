@@ -50,7 +50,7 @@ The Gumax motors are physically identical to AOK-E AM68. The only difference is 
 - RJ12 (6P6C) patch cables and a crimping tool, or pre-made cables
 
 **Software**
-- [ESPHome](https://esphome.io/guides/installing_esphome) 2026.9 (tested with 2026.9.1). The uartex component is pinned to tag `v260904` in [esphome/awning-motor.yaml](esphome/awning-motor.yaml); update ESPHome and uartex together.
+- [ESPHome](https://esphome.io/guides/installing_esphome) 2026.9 (tested with 2026.9.1). The uartex component is bundled in [esphome/components/uartex](esphome/components/uartex) (patched copy of tag `v260904`, see [uartex](#uartex-bundled-patched-copy)); update ESPHome and uartex together.
 - Home Assistant (optional but recommended for the cover UI; it is also the clock for the `Last Seen` sensors)
 - Python 3 with [aioesphomeapi](https://pypi.org/project/aioesphomeapi/), only for [tools/esp_probe.py](tools/esp_probe.py)
 
@@ -224,8 +224,8 @@ nothing has to be looked up.
    without use; every Program press restarts the 10 minutes.
 2. Connect **only** the motor to be programmed to the bus.
 3. Press its button, e.g. **`Awning 3 Program`**. The firmware
-   - scans the bus: the broadcast status query (answered by unprogrammed
-     motors only) and one status query per configured motor,
+   - scans the bus: the broadcast status query and one status query per
+     configured motor (a reply lost on one query is caught by another),
    - refuses unless exactly one motor answered and no frame was garbled,
    - sends the programming frame (the motor blinks blue three times),
    - queries the new ID and channel to confirm.
@@ -237,10 +237,10 @@ nothing has to be looked up.
 **`Scan Bus`** runs the same scan without programming and works without
 Programming Mode, e.g. `Scan: 1 motor: ID 0 (unprogrammed)`.
 
-A motor programmed with an ID or channel that is not in the configuration
-answers none of the scan queries. The scan cannot detect it, and Program is
-refused with "no motor answered". Reset such a motor to factory state (it then
-answers as ID 0) or program it with the raw frames below.
+If Program is refused with "no motor answered" although the motor is
+connected, its replies were lost on the bus (see
+[Troubleshooting](#troubleshooting)); press `Scan Bus` a few times, or program
+it with the raw frames below.
 
 **Procedure with raw frames** (used for [this installation](#this-installation)):
 
@@ -249,11 +249,9 @@ Assistant (and watch the ESPHome log) or with [tools/esp_probe.py](tools/esp_pro
 The checksum is appended automatically.
 
 1. Connect **only** the motor to be programmed to the bus.
-2. Check the bus: send `9a 00 00 00 cc 00`. Only unprogrammed motors answer this
-   broadcast query, so exactly one reply `D8 00 00 00 …` must come back.
-   Programmed motors only answer a query for their own ID and channel, e.g.
-   `9a 01 01 00 cc 00`; query the configured IDs to make sure none of them is
-   still connected.
+2. Check the bus: send `9a 00 00 00 cc 00`. Every connected motor answers this
+   broadcast query with its own ID, so exactly one reply must come back
+   (`D8 00 00 00 …` for an unprogrammed motor).
 3. Program it, e.g. ID 2 on channel 1: `9a 02 01 00 aa aa`.
 4. Verify: `9a 02 01 00 cc 00` must be answered with `D8 02 01 00 …`.
 5. Disconnect the motor, connect the next one, continue with step 2.
@@ -302,7 +300,20 @@ All multi-byte values are big-endian. Baud rate: **2400 8N1**.
 
 ### Response frame (motor → ESP32, 10 bytes)
 
-The motor usually sends this frame **twice** in quick succession after each status query. While a motor is running it often does not answer status queries; when it does, the frame shows the intermediate position and the running flag.
+The motor usually sends this frame **twice**, back to back, after each status query. While a motor is running it often does not answer status queries; when it does, the frame shows the intermediate position and the running flag.
+
+On this installation bytes of the reply are sometimes lost: the first copy
+breaks off after a few bytes and the second copy follows directly, or a single
+copy arrives with one byte missing (the checksum still covers the missing
+byte, so the frame fails). The loss depends on the content: with byte 5 =
+`0x18` (24 V) all replies were intact; with `0x17` (23 V) the `0x17` or the
+`0x00` before it went missing on every query, identically at 2350, 2400 and
+2460 baud, so the motor probably sends the frame that way. The bundled uartex
+resynchronises on the second copy's header (see
+[uartex](#uartex-bundled-patched-copy)); a single damaged copy is lost. A
+frame that lost a `0x00` byte can still pass the XOR checksum, shifted by one
+byte; the covers ignore frames with a voltage byte outside 16–40 or a position
+above 100.
 
 | Byte | Meaning |
 |------|---------|
@@ -348,6 +359,7 @@ even after a move. With the limits set (the mounted motors), feedback works.
 ```
 esphome/
 ├── awning-motor.yaml          # main file — board, substitutions, motor list
+├── components/uartex/         # bundled, patched uartex (hub + cover)
 ├── packages/
 │   ├── motor.yaml             # template: cover + diagnostic sensors per motor
 │   ├── group.yaml             # template: all-awnings broadcast cover
@@ -594,6 +606,30 @@ changes, so a single disturbed frame shows up as a short error followed by
 `None` with the next valid frame. A value that stays on an error points to
 wiring, termination or a second device sending on the bus.
 
+Frames that break off (fewer than 10 bytes before the next header or a
+pause) are discarded by uartex without an error, so `RS485 Error` can stay on
+`None` while replies are lost. `Awning N Online` is the better indicator.
+
+### uartex (bundled, patched copy)
+
+[esphome/components/uartex](esphome/components/uartex) is a copy of
+[eigger/espcomponents](https://github.com/eigger/espcomponents) tag `v260904`
+(commit `0028799`, MIT licence, [LICENSE](esphome/components/uartex/LICENSE)),
+reduced to the hub and the cover platform. The configuration loads it as a
+local external component.
+
+The only change is in `Parser::parse_byte()` in
+[parser.cpp](esphome/components/uartex/parser.cpp), marked
+`gumax-sunshade-esphome patch`. When the 10-byte window no longer starts with
+the header `D8`, the original parser cleared the whole buffer, including a
+header that had already arrived inside it. The motors send each reply twice,
+so a broken first copy took the intact second copy with it. The patched
+parser drops leading bytes until the buffer starts with a header again.
+
+To update uartex: copy the hub files and `cover/` of the new tag over this
+folder (without the upstream README), re-apply the patch, update the tag and
+commit here, and re-test.
+
 ---
 
 ## Tools
@@ -669,6 +705,7 @@ change `ESPHOME_VERSION` in the workflow together with the version under
 | Position always 0, running flag never set | End limits not set — see [End limits](#end-limits) |
 | No status replies while a motor moves | Observed behaviour: motors often don't answer while running |
 | `Awning N Online` stays off | No valid reply from that motor: check wiring, `motor_id` and channel bytes, as for a cover that never updates |
+| `Awning N Online` off or flapping although the motor obeys commands | Replies are damaged (lost bytes; uartex drops such frames without an `RS485 Error`), see [Response frame](#response-frame-motor--esp32-10-bytes). Check the RS485 ground to motor pin 5, the connectors (moisture) and the 120R jumper. For a raw byte log add `debug:` to the `uart:` block (ESPHome [UART debugging](https://esphome.io/components/uart/#debugging)) |
 | `Awning N Last Seen` stays empty | No time yet: Home Assistant has not connected since the last reboot |
 | `RS485 Error` stays on an error | Disturbed frames: check A/B wiring, the 120R termination and that nothing else transmits on the bus |
 | A cover shows "open" although its motor never answered | ESPHome covers have no "unknown" state; the cover keeps its start value until the first reply. Check `Awning N Online` |
@@ -700,7 +737,7 @@ Modified in October 2026. The full record is in the Git history; this is the sum
 **Configuration**
 
 - Five motors instead of eight: IDs 1–4 on channel 1, ID 5 on channel 2. The motors are programmed to match, see [This installation](#this-installation).
-- uartex pinned to tag `v260904` instead of `@latest` with `refresh: always`, so a rebuild produces the same firmware.
+- uartex pinned to tag `v260904` instead of `@latest` with `refresh: always`, so a rebuild produces the same firmware. Since 1.3.0-beta.2 a patched copy of that tag is bundled instead, see [uartex](#uartex-bundled-patched-copy).
 - `rx_priority: loop`: receiving no longer blocks the ESPHome main loop, which had produced "took a long time" warnings.
 - Every received frame is logged at `DEBUG`, including replies no cover listens to (an unprogrammed motor answering as ID 0). The per-motor decode log moved from `INFO` to `DEBUG`.
 - `poll_interval` now takes effect: a package default in `motor.yaml` shadowed the value from the main file.
@@ -718,8 +755,9 @@ Modified in October 2026. The full record is in the Git history; this is the sum
 - Version 1.1.1: OTA uploads are encrypted with the API key instead of protected by `ota_password`, which is gone; see [Firmware updates (OTA)](#firmware-updates-ota).
 - Version 1.2.0: per-motor `Voltage` and `Last Seen` sensors, the `RS485 Error` sensor, and Home Assistant as time source; see [Voltage and last seen](#voltage-and-last-seen).
 - Version 1.2.1: raw position direction fixed (0 = closed, 100 = open) for feedback and position commands. Closed awnings had been shown as open after the next status poll; see [Position conventions](#position-conventions).
-- Version 1.3.0-beta.1: motor programming from the web interface and Home Assistant (`Programming Mode`, `Scan Bus`, `Programming Status`, one `Awning N Program` button per motor) in the new `packages/programming.yaml`; see [Addressing motors](#addressing-motors-programming-ids-and-channels). Beta: scan and refusals tested, the programming run itself not yet. Found on the way: programmed motors do not answer the broadcast status query, only a query for their own ID and channel.
-- Version 1.3.0-beta.1 also: `All Awnings` offers a position (slider in the web interface and Home Assistant). uartex only enables position support with a `state_position`; the broadcast cover now has one that returns its own optimistic position. Beta: whether the motors obey the broadcast position command is not tested yet.
+- Version 1.3.0-beta.1: motor programming from the web interface and Home Assistant (`Programming Mode`, `Scan Bus`, `Programming Status`, one `Awning N Program` button per motor) in the new `packages/programming.yaml`; see [Addressing motors](#addressing-motors-programming-ids-and-channels). Beta: scan and refusals tested, the programming run itself not yet.
+- Version 1.3.0-beta.1 also: `All Awnings` offers a position (slider in the web interface and Home Assistant). uartex only enables position support with a `state_position`; the broadcast cover now has one that returns its own optimistic position. Tested: all motors move to the commanded position.
+- Version 1.3.0-beta.2: bundled, patched uartex whose parser resynchronises on the next header, so the intact second copy of a damaged reply is used (tested: `Scan Bus` found a motor it had missed before); covers ignore implausible (byte-shifted) frames, which showed as `Voltage` 0 V. Not fixed: replies that arrive as a single copy with a missing byte are still lost, so `Awning N Online` can stay off while the motor obeys commands. An earlier note that programmed motors ignore the broadcast status query was wrong: their replies had been lost the same way.
 
 **Documentation**
 
@@ -753,7 +791,7 @@ Modified in October 2026. The full record is in the Git history; this is the sum
 - **Original project**: [s3bi77/gumax-sunshade-esphome](https://github.com/s3bi77/gumax-sunshade-esphome) — protocol analysis, documentation and ESPHome configuration this fork is built on.
 - **Protocol reference**: [Loxone Library — Electric Curtain Drive A-OK](https://library.loxone.com/detail/electric-curtain-drive-a-ok-1922/overview) — community documentation of the AOK-E AM68 RS485 protocol that helped confirm the frame structure.
 - **ESPHome** — open-source firmware framework ([Apache 2.0](https://github.com/esphome/esphome/blob/dev/LICENSE)).
-- **uartex** by [eigger](https://github.com/eigger) — ESPHome external component that provides declarative RS485 frame parsing and command dispatch ([MIT License](https://github.com/eigger/espcomponents/blob/master/LICENSE), [source](https://github.com/eigger/espcomponents)).
+- **uartex** by [eigger](https://github.com/eigger) — ESPHome external component that provides declarative RS485 frame parsing and command dispatch ([MIT License](https://github.com/eigger/espcomponents/blob/master/LICENSE), [source](https://github.com/eigger/espcomponents)). A patched copy is bundled in [esphome/components/uartex](esphome/components/uartex), see [uartex](#uartex-bundled-patched-copy).
 - **aioesphomeapi** — Python client for the ESPHome native API, used by `tools/esp_probe.py` ([MIT License](https://github.com/esphome/aioesphomeapi)).
 - **Inspiration for the web interface and operational features**: [Tysonpower/HCPBridgeMqtt_tynet](https://github.com/Tysonpower/HCPBridgeMqtt_tynet) — its ESPHome configuration was the inspiration for the web interface, fallback access point, diagnostics and project versioning here, adapted to five motors on one RS485 bus.
 

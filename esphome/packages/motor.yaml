@@ -67,6 +67,14 @@ cover:
       match: prefix
     # Position mapping: raw 0 (closed)→100 (open)  ↔  ESPHome 0.0 (closed)→1.0 (open)
     state_position: !lambda |-
+      // Plausibility: a frame that lost a 0x00 byte can still pass the XOR
+      // checksum, shifted by one byte.  Byte [4] (supply voltage, 0x17/0x18
+      // observed) then reads 0.  Ignore such frames: returning the current
+      // position changes nothing.
+      if (data[4] < 16 || data[4] > 40 || data[6] > 100) {
+        ESP_LOGD("awning", "Motor ${motor_id}  implausible frame ignored");
+        return id(awning_${motor_id}).position;
+      }
       ESP_LOGD("awning", "Motor ${motor_id}  pos=%d%%  running=%d",
                data[6], data[7] & 0x01);
       // Supply voltage (byte [4], meaning not confirmed): publish on change.

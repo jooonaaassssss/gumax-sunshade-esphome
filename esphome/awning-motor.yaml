@@ -10,9 +10,12 @@
 # See README for wiring, motor addressing and the protocol reference.
 # ===========================================================================
 external_components:
-  # Pinned to a release tag so that a rebuild produces the same firmware.
-  # uartex follows ESPHome API changes: bump it deliberately and re-test.
-  - source: github://eigger/espcomponents@v260904
+  # Patched copy of uartex (eigger/espcomponents v260904, MIT, hub + cover
+  # only) in components/uartex: the frame parser resynchronises on the next
+  # header instead of discarding it with a truncated frame.  README → uartex.
+  - source:
+      type: local
+      path: components
     components: [ uartex ]
 
 substitutions:
@@ -117,7 +120,7 @@ esphome:
   # Bump the version on every firmware-relevant change (README → Versioning).
   project:
     name: jooonaaassssss.gumax-sunshade-esphome
-    version: "1.3.0-beta.1"
+    version: "1.3.0-beta.2"
 
 esp32:
   board: esp32-s3-devkitc-1
