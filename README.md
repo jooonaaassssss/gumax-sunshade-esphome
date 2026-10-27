@@ -18,14 +18,16 @@ under the same licence, the MIT License. See [Fork history](#fork-history),
 ## Features
 
 - Individual open/close/stop and **position control** (0–100 %) per motor
-- **Position feedback** read from the motor's own status frames, polled every 30 s
-- **All-awnings broadcast** cover — open/close/stop/position all motors with one command
-- **RS485 Raw Command** text entity to send any frame from Home Assistant (motor addressing, debugging)
+- **Live feedback**: position read from the motor's own status replies, polled every 15 s and every 3 s while a motor moves; the covers show **opening/closing** until the motor reports idle, also for moves by the remote control, see [How feedback works](#how-feedback-works)
+- Replies that lose bytes on the bus are still read where it is safe, see [Response frame](#response-frame-motor--esp32-10-bytes)
+- **All-awnings** cover — open/close/stop/position for all motors with one command; it shows the average position and the motion of the online motors
+- Positions are restored after a reboot; motors that do not answer (e.g. not connected) are polled only every 5 minutes
+- **RS485 Raw Command** text entity to send any frame from Home Assistant (motor addressing, debugging); programming frames need Programming Mode
 - **Motor programming from the UI**: one `Program` button per motor, guarded by a bus scan and a self-expiring `Programming Mode`, see [Addressing motors](#addressing-motors-programming-ids-and-channels)
 - Every RS485 reply is logged at `DEBUG` level, damaged ones included
 - **Web interface** built into the firmware (ESPHome `web_server` v3, password-protected) — works without Home Assistant, see [Web interface](#web-interface)
 - **Online, voltage and last-seen sensors per motor**, an **RS485 error** sensor, a **fallback access point** with captive portal, and diagnostic entities (WiFi signal, uptime, IP, ESPHome version, restart / safe mode)
-- Plain ESPHome YAML on top of the [uartex](https://github.com/eigger/espcomponents) external component
+- Plain ESPHome YAML on top of the [uartex](https://github.com/eigger/espcomponents) external component, with the bus logic in three small C++ headers that are unit-tested in CI
 - [tools/esp_probe.py](tools/esp_probe.py) — send frames and watch the bus from a PC, without Home Assistant
 
 ---
@@ -50,8 +52,8 @@ The Gumax motors are physically identical to AOK-E AM68. The only difference is 
 - RJ12 (6P6C) patch cables and a crimping tool, or pre-made cables
 
 **Software**
-- [ESPHome](https://esphome.io/guides/installing_esphome) 2026.9 (tested with 2026.9.1). The uartex component is bundled in [esphome/components/uartex](esphome/components/uartex) (patched copy of tag `v260904`, see [uartex](#uartex-bundled-patched-copy)); update ESPHome and uartex together.
-- Home Assistant (optional but recommended for the cover UI; it is also the clock for the `Last Seen` sensors)
+- [ESPHome](https://esphome.io/guides/installing_esphome) 2026.10 (tested with 2026.10.0). The uartex component is bundled in [esphome/components/uartex](esphome/components/uartex) (patched copy of tag `v260904`, see [uartex](#uartex-bundled-patched-copy)); update ESPHome and uartex together.
+- Home Assistant (optional but recommended for the cover UI; it is also a clock for the `Last Seen` sensors, next to SNTP)
 - Python 3 with [aioesphomeapi](https://pypi.org/project/aioesphomeapi/), only for [tools/esp_probe.py](tools/esp_probe.py)
 
 ---
@@ -72,7 +74,7 @@ The Gumax motors are physically identical to AOK-E AM68. The only difference is 
    ```bash
    esphome run esphome/awning-motor.yaml
    ```
-   With the ESPHome Device Builder in Home Assistant instead, copy `awning-motor.yaml` and the `packages/` folder to `/config/esphome/` and add the six keys from `secrets.yaml.example` to the Device Builder's own `secrets.yaml`.
+   With the ESPHome Device Builder in Home Assistant instead, copy `awning-motor.yaml` and the folders `packages/`, `include/` and `components/` to `/config/esphome/` and add the six keys from `secrets.yaml.example` to the Device Builder's own `secrets.yaml`.
 4. Add the discovered device in Home Assistant and enter the API key.
 5. Give every motor its ID, once per motor: [Addressing motors](#addressing-motors-programming-ids-and-channels).
 
@@ -95,9 +97,12 @@ are kept out of Git (`esphome/secrets.yaml` is ignored).
 Controller: Waveshare ESP32-S3-RS485-CAN, UART RX GPIO18, TX GPIO17, driver
 enable GPIO21, hostname `awning-motor`.
 
-The IDs were programmed one motor at a time with [tools/esp_probe.py](tools/esp_probe.py)
-and each one verified by a status query. A motor that is factory-reset forgets
-its ID and has to be programmed again.
+Motors 1 and 2 are installed and programmed; motors 3–5 are configured but
+not connected yet (their `Online` sensors stay off and they are polled only
+every 5 minutes). Motor 1 was programmed with the RS485 Raw Command frames,
+motor 2 kept its ID through a factory reset; new motors are programmed with
+their `Program` button. A motor that is factory-reset may forget its ID and
+then has to be programmed again.
 
 Motors 1 and 2 are linked by a full 6-wire RJ12 cable on purpose, so each
 remote channel moves both (see [Daisy-chaining motors](#3-daisy-chaining-motors)).
@@ -120,7 +125,7 @@ Each motor has two identical RJ12 sockets (daisy-chain in / out). Pin numbering 
 | 2   | DOWN     | Hardwired control input (not used here) |
 | 3   | STOP     | Hardwired control input (not used here) |
 | 4   | UP       | Hardwired control input (not used here) |
-| 5   | COM/GND  | Signal ground — also connect to ESP32 GND |
+| 5   | COM/GND  | Signal ground — connect to the converter's GND if it has one (the Waveshare board has none) |
 | 6   | RS485-B  | Differential data B (inverting) |
 
 > **5 V power tap**: On the motor PCB itself (barely visible near the end cap) there is an unpopulated 5 V test point. You can solder a thin wire here to power the ESP32 directly from the motor's internal supply, avoiding a separate power source. Confirm voltage before connecting; the ESP32's 5 V pin and the VIN of the converter module should each draw < 200 mA combined.
@@ -131,7 +136,7 @@ Connect motors in a chain using RJ12 straight-through cables:
 
 ```
 Motor 1 ──RJ12── Motor 2 ──RJ12── Motor 3 ──RJ12── … ──RJ12── Motor N
-    └─── RS485-A/B/GND wires to ESP32 RS485 converter
+    └─── RS485-A/B (and GND, if the converter has it) to the ESP32 RS485 converter
 ```
 
 > **Use only pins 1, 5 and 6 between motors.** A full 6-wire cable also links
@@ -169,8 +174,10 @@ pin 5 stays unconnected.
   lose bytes that start with several 1 bits (observed here after days of
   error-free operation, see
   [Response frame](#response-frame-motor--esp32-10-bytes)). A 120R
-  termination without bias makes this worse. The firmware copes for the
-  online sensors and programming; position and voltage need intact replies.
+  termination without bias makes this worse. The firmware copes: online
+  detection and programming need only the first bytes of a reply, and
+  position, motion and voltage are read from damaged replies where that is
+  safe (see [How feedback works](#how-feedback-works)).
   Bias resistors (560 Ω–1 kΩ from A to +5 V and from B to GND of the bus
   side) would fix it electrically, but this board has no terminal for the
   bus-side supply.
@@ -185,7 +192,7 @@ board and set the pins in `substitutions:`.
 |---|---|---|
 | A (or D+) | — | Connect to motor RS485-A |
 | B (or D−) | — | Connect to motor RS485-B |
-| GND | GND | Must share ground with motors |
+| GND | GND | Shared ground with the motors (pin 5), if the converter has a GND terminal |
 | RO (RX out) | e.g. GPIO16 → `uart_rx_pin` | Converter RO → ESP32 RX |
 | DI (TX in) | e.g. GPIO17 → `uart_tx_pin` | Converter DI ← ESP32 TX |
 | DE + RE | any GPIO → `uart_flow_control_pin` | Only for converters without automatic direction switching |
@@ -274,9 +281,11 @@ As a last resort program it with the raw frames below.
 
 Send the frames below either through the **RS485 Raw Command** entity in Home
 Assistant (and watch the ESPHome log) or with [tools/esp_probe.py](tools/esp_probe.py).
-The checksum is appended automatically.
+The checksum is appended automatically. The programming frame (`aa aa`) is
+only sent while **`Programming Mode`** is on; otherwise it is refused (log
+warning, `Programming Status`).
 
-1. Connect **only** the motor to be programmed to the bus.
+1. Switch on `Programming Mode` and connect **only** the motor to be programmed to the bus.
 2. Check the bus: send `9a 00 00 00 cc 00`. Every connected motor answers this
    broadcast query with its own ID, so exactly one reply must come back
    (`D8 00 00 00 …` for an unprogrammed motor).
@@ -284,7 +293,7 @@ The checksum is appended automatically.
 4. Verify: `9a 02 01 00 cc 00` must be answered with `D8 02 01 00 …`.
 5. Disconnect the motor, connect the next one, continue with step 2.
 
-With esp_probe.py, steps 2–4 for motor 2 are:
+With esp_probe.py (and `Programming Mode` on), steps 2–4 for motor 2 are:
 
 ```bash
 python tools/esp_probe.py "9a 00 00 00 cc 00"
@@ -295,7 +304,7 @@ python tools/esp_probe.py "9a 02 01 00 aa aa" "9a 02 01 00 cc 00"
 
 > **IDs are hex**: motor 9 is `0x09`, motor 10 is `0x0A`, not `10`. For setups with up to 9 motors this distinction doesn't matter.
 
-> **Channels are for addressing only**: the channel bytes in a broadcast frame (ID=0x00) are ignored — all motors respond regardless of their programmed channel. Channels serve purely as an identifier during the ID-programming step and for per-motor individual commands.
+> **Channels are for addressing only**: the channel bytes in a broadcast frame (ID=0x00) are ignored — all motors respond regardless of their programmed channel. Channels serve purely as an identifier during the ID-programming step and for per-motor individual commands. Broadcasts work for open, close, stop and the status query, not for positions (see [Command frame](#command-frame-esp32--motor-7-bytes)).
 
 ---
 
@@ -323,41 +332,31 @@ All multi-byte values are big-endian. Baud rate: **2400 8N1**.
 | `0x0A` | `0xCC` | STOP |
 | `0x0A` | `0xEE` | Move DOWN (close) |
 | `0xCC` | `0x00` | Status query (motor replies with a response frame) |
-| `0xDD` | `0x00`–`0x64` | Go to absolute position (0=closed, 100=open) |
+| `0xDD` | `0x00`–`0x64` | Go to absolute position (0=closed, 100=open). Ignored when sent to ID 0 (broadcast), with or without channel bytes; tested on this installation |
 | `0xAA` | `0xAA` | Program ID and channel (see [Addressing motors](#addressing-motors-programming-ids-and-channels)) |
 
 ### Response frame (motor → ESP32, 10 bytes)
 
 The motor usually sends this frame **twice**, back to back, after each status query. While a motor is running it often does not answer status queries; when it does, the frame shows the intermediate position and the running flag.
 
-On this installation bytes of the reply are sometimes lost: the first copy
-breaks off after a few bytes and the second copy follows directly, or a single
-copy arrives with one byte missing. In every recorded case the lost byte was
-`b3` or the voltage byte (frame bytes 4–5); header, ID, channel, position,
-zone and checksum were intact. It started after days of error-free operation,
-with byte 5 = `0x17` (23 V) instead of `0x18` (24 V), and was identical at
-2350, 2400 and 2460 baud. Each reply is followed by `0x00` bytes, i.e. the
-receiver reads 0 once the motor stops sending, which points to a bus without
-fail-safe bias, see [Waveshare ESP32-S3-RS485-CAN](#4-waveshare-esp32-s3-rs485-can).
+On this installation bytes of the reply are sometimes lost. Recorded
+patterns:
 
-How the firmware copes:
+- The end of the first copy and/or the start of the second copy (its `D8`,
+  while the motor moves also its ID or a channel byte) are lost; the rest of
+  the second copy is intact. Between the copies there is often a `00` or an
+  extra `D8`.
+- A single copy arrives with one byte missing between the channel and the
+  position byte (`b3` or the voltage).
 
-- The bundled uartex resynchronises on the second copy's header (see
-  [uartex](#uartex-bundled-patched-copy)).
-- A single damaged copy still identifies the motor by its first bytes
-  (online sensor, last seen, bus scan).
-- Its position, zone and voltage are read by
-  [include/awning_frame.h](esphome/include/awning_frame.h): the checksum
-  gives the value of the lost byte, and the place of the voltage byte shows
-  whether the loss was before the position byte. Only then is the reply used;
-  a loss behind the voltage byte is ignored. In a simulation with one lost
-  byte at any position this gave no wrong value.
-- A frame that lost a `0x00` byte can pass the XOR checksum, shifted by one
-  byte; the covers ignore frames with a voltage byte outside 16–40 or a
-  position above 100 (and `awning_frame.h` reads them as damaged).
-
-Example: `D8 01 01 00 00 00 0F 02 1A` (the voltage `0x17` is missing) is read
-as motor 1, position 15 %, idle, 23 V.
+It started after days of error-free operation, with byte 5 = `0x17` (23 V)
+instead of `0x18` (24 V), and was identical at 2350, 2400 and 2460 baud.
+Each reply is followed by `0x00` bytes, i.e. the receiver reads 0 once the
+motor stops sending, which points to a bus without fail-safe bias, see
+[Waveshare ESP32-S3-RS485-CAN](#4-waveshare-esp32-s3-rs485-can). Since the
+update to ESPHome 2026.10 most idle replies arrive intact again; replies of
+running motors are still often damaged. How the firmware reads them is
+described in [How feedback works](#how-feedback-works).
 
 | Byte | Meaning |
 |------|---------|
@@ -365,21 +364,28 @@ as motor 1, position 15 %, idle, 23 V.
 | 1 | Motor ID (`0x00` = not programmed) |
 | 2 | Channel low byte |
 | 3 | Channel high byte |
-| 4–6 | Unknown. Byte 5 appears to be the supply voltage in volts (`0x17`/`0x18` observed); reported as `Awning N Voltage` |
+| 4 | `b3`, unknown: `0x00` while idle, non-zero while running (motor current or speed?) |
+| 5 | Supply voltage in volts, it seems (`0x17`/`0x18` observed); reported as `Awning N Voltage` |
+| 6 | `b5`, unknown: `0x00` while idle, non-zero while running |
 | 7 | Position: 0–100 |
-| 8 | Zone flags: bit 0 = motor running |
+| 8 | Zone: `0x00`/`0x02` idle (`0x02` after a move, meaning not confirmed), `0x03` running downwards (closing), `0x43` running upwards (opening). Bit 0 = running, bit 6 = opening |
 | 9 | Checksum: XOR of bytes 1–8 |
 
 Example: `D8 02 01 00 00 18 00 00 00 1B` — motor 2, channel 1, position 0 (closed), idle.
 
-Observed on motor 1 (zone bit 1 is set after a move; its meaning is not confirmed):
+Observed on motors 1 and 2:
 
 | Frame | State |
 |---|---|
 | `D8 01 01 00 00 18 00 64 02 7E` | Fully open: position 100, zone `0x02` |
-| `D8 01 01 00 26 18 65 39 03 61` | Moving: position 57, zone `0x03` (running) |
+| `D8 01 01 00 1A 17 4D 0F 43 0C` | Opening: position 15, zone `0x43` |
+| `D8 01 01 00 26 18 65 39 03 61` | Closing: position 57, zone `0x03` |
 | `D8 01 01 00 00 18 00 00 02 1A` | Fully closed: position 0, zone `0x02` |
 
+The firmware treats other zone values, and `b3`/`b5` that do not match the
+running bit, as implausible: such a reply only counts as a sign of life (see
+[How feedback works](#how-feedback-works)). If a motor shows other values,
+the log has `Motor N  reply not readable` after its `RX D8 …` line.
 ### Position conventions
 
 Raw position 0 is closed and 100 is open, confirmed on this installation in
@@ -404,27 +410,32 @@ even after a move. With the limits set (the mounted motors), feedback works.
 esphome/
 ├── awning-motor.yaml          # main file — board, substitutions, motor list
 ├── components/uartex/         # bundled, patched uartex (hub + cover)
-├── include/awning_frame.h     # reads motor replies, also damaged ones
+├── include/
+│   ├── awning_frame.h         # frames: reads replies (also damaged ones), commands
+│   ├── awning_motion.h        # per motor: online, opening/closing, poll schedule
+│   └── awning_motor.h         # connects both to the covers and sensors
 ├── packages/
 │   ├── motor.yaml             # template: cover + diagnostic sensors per motor
-│   ├── group.yaml             # template: all-awnings broadcast cover
+│   ├── group.yaml             # template: all-awnings cover
 │   └── programming.yaml       # motor programming: mode, bus scan, status
 ├── secrets.yaml.example       # template for secrets.yaml
 └── secrets.yaml               # your credentials (git-ignored)
+tests/
+└── awning_test.cpp            # host test of awning_frame.h and awning_motion.h
 tools/
 ├── esp_probe.py               # send frames / watch the bus over the native API
 └── requirements.txt
 .github/workflows/
-└── validate.yml               # CI: esphome config + compile
+└── validate.yml               # CI: host test, esphome config + compile
 ```
 
 ### Entities
 
 | Entity | Source | Category | Web UI group | Purpose |
 |---|---|---|---|---|
-| One cover per motor (`awning_N`, e.g. `Awning 1`) | `packages/motor.yaml` | — | Awnings | Open/close/stop/position, position feedback |
-| `All Awnings` cover | `packages/group.yaml` | — | Awnings | Open/close/stop/position for every motor at once (broadcast, no feedback) |
-| `RS485 Raw Command` text | `awning-motor.yaml` | — | Service | Send any frame, e.g. for addressing |
+| One cover per motor (`awning_N`, e.g. `Awning 1`) | `packages/motor.yaml` | — | Awnings | Open/close/stop/position; position and opening/closing from the motor, see [How feedback works](#how-feedback-works) |
+| `All Awnings` cover | `packages/group.yaml` | — | Awnings | Open/close/stop/position for every motor at once; shows the average position and the motion of the online motors |
+| `RS485 Raw Command` text | `awning-motor.yaml` | — | Service | Send any frame, e.g. for addressing; programming frames only in Programming Mode |
 | `Restart`, `Safe Mode` buttons | `awning-motor.yaml` | config | Service | Reboot; reboot into safe mode (OTA only) |
 | `Programming Mode` switch | `packages/programming.yaml` | config | Programming | Enables the Program buttons; off at boot and after 10 min without use |
 | `Scan Bus` button | `packages/programming.yaml` | config | Programming | Lists the motors that answer, see [Addressing motors](#addressing-motors-programming-ids-and-channels) |
@@ -450,7 +461,10 @@ substitutions:
   uart_tx_pin: GPIO17
   uart_flow_control_pin: GPIO21    # RS485 driver enable (DE/RE)
 
-  poll_interval: 30s               # How often to query each motor
+  poll_interval: 15s               # status query of an idle motor
+  fast_poll_interval: 3s           # ... while it moves
+  offline_poll_interval: 5min      # ... while it is offline (e.g. not connected)
+  offline_timeout: 90s             # no reply for this long: Online off
 
   group1_channel_l: "0x01"         # ChanL byte for group 1 motors
   group1_channel_h: "0x00"
@@ -477,11 +491,11 @@ packages:
 Each entry generates one `awning_N` cover, the `Awning N Online`,
 `Awning N Voltage` and `Awning N Last Seen` diagnostic sensors and the
 `Awning N Program` button (which needs the `programming` package entry).
-The cover polls its motor every `poll_interval` and only accepts response
-frames that carry its `motor_id`. In the web interface the covers are sorted
+The motor is polled as described in [How feedback works](#how-feedback-works);
+only replies that carry its `motor_id` and channel count. In the web interface the covers are sorted
 by `motor_id` (`sorting_weight: ${motor_id}` in `motor.yaml`).
 
-### Step 3 — All-awnings broadcast cover
+### Step 3 — All-awnings cover
 
 A single `group_all` package entry covers all motors at once:
 
@@ -494,7 +508,7 @@ A single `group_all` package entry covers all motors at once:
         group_id: awning_all
 ```
 
-This sends a broadcast frame with ID=0x00, ChanL=0x00, ChanH=0x00, which all motors obey. Channel-filtered broadcast (ID=0 with non-zero channel bytes) **does not work** — motors obey any ID=0 frame regardless of their programmed channel.
+Open, close and stop are sent as one broadcast frame (ID=0x00, ChanL=0x00, ChanH=0x00), which all motors obey, so they start together. Channel-filtered broadcast (ID=0 with non-zero channel bytes) **does not work** — motors obey any ID=0 frame regardless of their programmed channel. Position frames sent to ID 0 are ignored by the motors, so a position (e.g. 25 %) goes to every motor that has answered since boot as its own command, 1.5 s apart.
 
 ### Step 4 — Programming package
 
@@ -510,10 +524,93 @@ see [Addressing motors](#addressing-motors-programming-ids-and-channels).
 
 To **remove** a motor, delete its `motor_N` package block. To **add** one, copy
 an existing block, increment the key and set `motor_id`, `motor_name`,
-`channel_l` and `channel_h`. Nothing else needs to change: every cover carries
-its own poll command and state filter.
+`channel_l` and `channel_h`. Nothing else needs to change: every motor
+registers itself at boot (polling, `All Awnings`, bus scan).
 
 All `motor_id` values must match the ID programmed into the physical motor hardware (see [Addressing motors](#addressing-motors-programming-ids-and-channels)).
+
+---
+
+## How feedback works
+
+The motors report their state only when asked (status query `cc 00`). The
+logic is in three headers in [esphome/include](esphome/include):
+[awning_frame.h](esphome/include/awning_frame.h) reads the frames,
+[awning_motion.h](esphome/include/awning_motion.h) keeps the state of each
+motor, [awning_motor.h](esphome/include/awning_motor.h) connects them to the
+entities. The first two have no ESPHome dependencies and are tested on the
+host by [tests/awning_test.cpp](tests/awning_test.cpp), see
+[Continuous integration](#continuous-integration).
+
+**Polling.** Each motor gets a status query
+
+| State | Interval (substitution) |
+|---|---|
+| Idle | 15 s (`poll_interval`) |
+| Moving, after a command or a reply with the running bit | 3 s (`fast_poll_interval`) |
+| Offline, or not answered since boot (e.g. not connected) | 5 min (`offline_poll_interval`) |
+
+and one right after boot. At most one query per motor waits in uartex's
+queue, behind any commands; uartex sends one frame every 1.5 s (`tx_delay`),
+so with several motors moving each one is polled every 3 s or every
+(number of moving motors × 1.5 s), whichever is longer.
+
+**Reading the replies.** Every burst of received bytes goes through
+`read_reply()`. A burst belongs to a motor if it starts with `D8` and the
+motor's ID and channel bytes; that alone sets `Online` and `Last Seen`. The
+status (position, zone, voltage) comes from
+
+1. every intact block (ID … checksum) with the motor's address in the burst,
+   including a second copy that lost its `D8`,
+2. the end of the burst: the last copy's `b3 voltage b5 position zone
+   checksum`, checked against the motor's known address (covers a second
+   copy that lost its ID or a channel byte),
+
+and is only used if all of these agree. Failing both, a single copy with one
+lost byte before the position is repaired from the checksum (its voltage is
+not used). Every block must be plausible: voltage 20–30, position ≤ 100, a
+known zone value, `b3`/`b5` zero exactly when idle (see
+[Response frame](#response-frame-motor--esp32-10-bytes)). These checks matter
+because an XOR checksum also matches many blocks that lost a `0x00` byte.
+
+The host test feeds 400 000 simulated replies (one or two copies, noise
+between and after them) with 0–3 bytes deleted at random places through
+`read_reply()`:
+
+| Lost bytes | Status read | Wrong position, motion or voltage |
+|---|---|---|
+| 0 | 100 % | 0 |
+| 1 | 84 % | 1 in 100 000 |
+| 2–3 | 33–57 % | 14 in 200 000 |
+
+No burst gave a status for another motor. The remaining errors are copies
+that lost bytes in a way an XOR checksum cannot detect, e.g. the position
+byte `0x00` of a single copy whose checksum happens to be a valid zone.
+
+**Opening and closing.** When a command for a motor goes out on the bus
+(its cover, `All Awnings` or `RS485 Raw Command`), its cover shows opening or
+closing at once (direction from the target and the current position); the
+position stays at the motor's real value and follows its replies. The move
+ends with the first reply without the running bit, except that a reply
+"idle at the start position" within 5 s after the command is ignored (the
+motor may not have started yet), or after 2 minutes without a running
+reply. Stop shows idle at once and polls until the final position is in.
+A move by the remote control shows up with the next poll that has the
+running bit (within 15 s), then fast polling follows it. Motors often skip
+replies while running; then the cover jumps to the end position when the
+move is over. While running, the direction comes from the zone (`0x43`
+opening, `0x03` closing).
+
+**All Awnings** shows the average position of the online motors and
+opening/closing while they move (opening if at least as many open as
+close). Open, close and stop are broadcasts, so every motor follows them
+itself; a position is sent to each motor (see
+[Step 3](#step-3--all-awnings-cover)).
+
+**After a reboot** each cover shows its last position (saved by ESPHome's
+preferences, written to flash at most once a minute) until the first reply,
+which comes right after boot. A motor that never answered shows the
+default (open).
 
 ---
 
@@ -622,43 +719,49 @@ Every motor gets a binary sensor `Awning N Online` (device class
   bytes. The rest of the reply may be damaged; these first bytes survived in
   every damaged reply observed (see
   [Response frame](#response-frame-motor--esp32-10-bytes)).
-- It turns **off** only after **3 poll intervals** without a reply (90 s with
-  `poll_interval: 30s`). Motors often do not answer while they are moving, so a
-  single missed poll is normal and must not mark a motor offline.
-- After a reboot it is off until the motor answers its first poll (at most
-  one poll interval).
+- It turns **off** after `offline_timeout` (90 s) without a reply. Motors
+  often do not answer while they are moving, so a few missed polls are
+  normal and must not mark a motor offline.
+- After a reboot it is off until the motor answers its first poll, which
+  is sent right after boot.
 
-Each reply restarts an internal script (`awning_N_online_watchdog`) that
-waits 3 × the cover's update interval; the sensor reports whether that
-script is still running. The timeout therefore follows `poll_interval`
-automatically.
+The state is kept by `awning::Motor` (see
+[How feedback works](#how-feedback-works)); while a motor is offline it is
+polled only every `offline_poll_interval` (5 min), so a newly connected
+motor shows up within 5 minutes, or at once after `Scan Bus` or its
+`Program` button.
 
 ### Voltage and last seen
 
 - `Awning N Voltage` shows byte 5 of the status frame in volts. `0x17`/`0x18`
   (23/24 V) have been observed; it is probably the motor's internal DC
-  supply, but this is not confirmed. The value is sent only when it changes;
-  damaged replies count when their voltage byte can be identified (see
-  [Response frame](#response-frame-motor--esp32-10-bytes)).
+  supply, but this is not confirmed. The value is sent only when it changes.
+  It comes from intact blocks and from the end of a damaged reply (checked
+  by the checksum), not from a single copy repaired from the checksum (see
+  [How feedback works](#how-feedback-works)).
 - `Awning N Last Seen` (device class `timestamp`) is the time of the motor's
-  latest reply (as for the online sensor, damaged replies count). The clock comes from Home Assistant (`time: platform:
-  homeassistant`), so the sensor stays empty until Home Assistant has
-  connected once after a reboot. To keep the history small it is updated
-  when the motor comes back online and then at most every 5 minutes; when the
-  motor goes offline it is set to the exact time of its last reply.
+  latest reply (as for the online sensor, damaged replies count). The clock
+  comes from Home Assistant (`time: platform: homeassistant`) or, without
+  Home Assistant, from SNTP (`pool.ntp.org`); both set the system clock. The
+  sensor stays empty until one of them has synchronised after a reboot. To
+  keep the history small it is updated when the motor comes back online and
+  then at most every 5 minutes; when the motor goes offline it is set to the
+  exact time of its last reply.
 
 ### RS485 error sensor
 
 `RS485 Error` is uartex's built-in error sensor. It shows the result of the
-last received frame: `None` for a valid frame, otherwise `Size Error`,
-`Header Error`, `Checksum Error` and so on. It is only sent when the value
-changes, so a single disturbed frame shows up as a short error followed by
-`None` with the next valid frame. A value that stays on an error points to
-wiring, termination or a second device sending on the bus.
+last frame uartex's parser received: `None` for a valid frame, otherwise
+`Size Error`, `Header Error`, `Checksum Error` and so on. It is only sent when
+the value changes, so a single disturbed frame shows up as a short error
+followed by `None` with the next valid frame. A value that stays on an error
+points to wiring, termination or a second device sending on the bus.
 
-Frames that break off (fewer than 10 bytes before the next header or a
-pause) are discarded by uartex without an error, so `RS485 Error` can stay on
-`None` while replies are lost. `Awning N Online` is the better indicator.
+The covers do not use uartex's parser (see
+[How feedback works](#how-feedback-works)), and frames that break off (fewer
+than 10 bytes before the next header or a pause) are discarded by it without
+an error, so `RS485 Error` can stay on `None` while replies are damaged.
+`Awning N Online` and the `RX` lines in the log are the better indicators.
 
 ### uartex (bundled, patched copy)
 
@@ -666,20 +769,28 @@ pause) are discarded by uartex without an error, so `RS485 Error` can stay on
 [eigger/espcomponents](https://github.com/eigger/espcomponents) tag `v260904`
 (commit `0028799`, MIT licence, [LICENSE](esphome/components/uartex/LICENSE)),
 reduced to the hub and the cover platform. The configuration loads it as a
-local external component.
+local external component. Here it sends the commands and status queries
+(one every `tx_delay`) and feeds the `RS485 Error` sensor; its write
+callback tells each motor which commands went out.
 
-The only change is in `Parser::parse_byte()` in
-[parser.cpp](esphome/components/uartex/parser.cpp), marked
-`gumax-sunshade-esphome patch`. When the 10-byte window no longer starts with
-the header `D8`, the original parser cleared the whole buffer, including a
-header that had already arrived inside it. The motors send each reply twice,
-so a broken first copy took the intact second copy with it. The patched
-parser drops leading bytes until the buffer starts with a header again.
+Three changes, each marked `gumax-sunshade-esphome patch`:
+
+1. `Parser::parse_byte()` in [parser.cpp](esphome/components/uartex/parser.cpp):
+   when the 10-byte window no longer starts with the header `D8`, the
+   original parser cleared the whole buffer, including a header that had
+   already arrived inside it. The patched parser drops leading bytes until
+   the buffer starts with a header again.
+2. `UARTExCover::control()` in
+   [uartex_cover.cpp](esphome/components/uartex/cover/uartex_cover.cpp): only
+   an `optimistic` cover takes the target position at once. Upstream also did
+   so whenever a command was queued, so covers with feedback jumped to the
+   target and back.
+3. `UARTExCover::setup()`: restores the last published position after a
+   reboot (ESPHome's usual cover restore), which upstream did not do.
 
 To update uartex: copy the hub files and `cover/` of the new tag over this
-folder (without the upstream README), re-apply the patch, update the tag and
-commit here, and re-test.
-
+folder (without the upstream README), re-apply the patches, update the tag
+and commit here, and re-test.
 ---
 
 ## Tools
@@ -734,9 +845,15 @@ README-only or CI-only changes do not change the firmware and need no bump.
 [.github/workflows/validate.yml](.github/workflows/validate.yml) runs on every
 push and pull request:
 
-1. installs ESPHome **2026.9.1** (pinned, matching the tested version),
-2. copies `secrets.yaml.example` to `secrets.yaml` (placeholders only),
-3. runs `esphome config` and `esphome compile` in `esphome/`.
+- job `test`: builds and runs [tests/awning_test.cpp](tests/awning_test.cpp)
+  with g++ (`-Wall -Wextra -Werror`): reply decoding with recorded replies
+  and the lost-byte simulation, command parsing, motor state and polling
+  (see [How feedback works](#how-feedback-works)). Locally:
+  `g++ -std=c++17 -I esphome/include tests/awning_test.cpp -o awning_test && ./awning_test`.
+- job `validate`:
+  1. installs ESPHome **2026.10.0** (pinned, matching the tested version),
+  2. copies `secrets.yaml.example` to `secrets.yaml` (placeholders only),
+  3. runs `esphome config` and `esphome compile` in `esphome/`.
 
 PlatformIO and toolchain downloads are cached between runs. The workflow
 publishes nothing: no firmware artifacts, no releases. When updating ESPHome,
@@ -749,16 +866,18 @@ change `ESPHOME_VERSION` in the workflow together with the version under
 
 | Symptom | Likely cause |
 |---|---|
-| No reply to any frame | A and B swapped; wrong `uart_flow_control_pin`; on the Waveshare board try the 120R jumper |
+| No reply to any frame | A and B swapped; wrong `uart_flow_control_pin`; long bus runs may need the 120R jumper, but without bias it can make lost bytes worse (see [Waveshare ESP32-S3-RS485-CAN](#4-waveshare-esp32-s3-rs485-can)) |
 | Only `D8 00 …` replies | Motor not programmed, or factory-reset — see [Addressing motors](#addressing-motors-programming-ids-and-channels) |
 | A cover never updates | `motor_id` or channel bytes in the YAML don't match the motor |
 | Position always 0, running flag never set | End limits not set — see [End limits](#end-limits) |
-| No status replies while a motor moves | Observed behaviour: motors often don't answer while running |
+| No status replies while a motor moves | Observed behaviour: motors often don't answer while running; the cover shows the end position when the move is over |
 | `Awning N Online` stays off | No valid reply from that motor: check wiring, `motor_id` and channel bytes, as for a cover that never updates |
-| Position or voltage not updating although `Awning N Online` is on | Replies arrive damaged in a way [awning_frame.h](esphome/include/awning_frame.h) cannot read safely (the log shows `RX D8 …` lines without a following `pos=` line). See [Response frame](#response-frame-motor--esp32-10-bytes). The cover keeps showing the last known position |
-| `Awning N Last Seen` stays empty | No time yet: Home Assistant has not connected since the last reboot |
+| Position or voltage not updating although `Awning N Online` is on | Replies arrive damaged in a way that cannot be read safely, or with values the firmware does not know (the log shows `Motor N  reply not readable` after the `RX D8 …` line). See [How feedback works](#how-feedback-works). The cover keeps showing the last known position |
+| `Awning N Last Seen` stays empty | No time yet: neither Home Assistant nor SNTP has synchronised since the last reboot |
 | `RS485 Error` stays on an error | Disturbed frames: check A/B wiring, the 120R termination and that nothing else transmits on the bus |
-| A cover shows "open" although its motor never answered | ESPHome covers have no "unknown" state; the cover keeps its start value until the first reply. Check `Awning N Online` |
+| A cover shows "open" although its motor never answered | ESPHome covers have no "unknown" state; a motor that never answered keeps the default (open). Check `Awning N Online` |
+| A cover shows opening/closing, but the motor does not move | The motor ignored the command; the cover returns to idle 5 s after the command with the next reply. Position frames to ID 0 are always ignored, see [Step 3](#step-3--all-awnings-cover) |
+| `RS485 Raw Command` sends nothing | Malformed input (log warning), or a programming frame while `Programming Mode` is off |
 | OTA upload refused | The uploader's `api_key` differs from the one in the firmware; see [Firmware updates (OTA)](#firmware-updates-ota) |
 | A remote channel moves several motors | The motors are linked by a 6-wire RJ12 cable, which connects their wired inputs (pins 2–4); see [Daisy-chaining motors](#3-daisy-chaining-motors) |
 | `Program` refused: "no motor answered" | The motor is not connected, or it carries an ID/channel that is not in the configuration; see [Addressing motors](#addressing-motors-programming-ids-and-channels) |
@@ -794,10 +913,10 @@ Modified in October 2026. The full record is in the Git history; this is the sum
 - `poll_interval` now takes effect: a package default in `motor.yaml` shadowed the value from the main file.
 - The package templates no longer have defaults for required values, so a missing `motor_id` fails the build instead of silently creating `awning_1`. The broadcast cover no longer takes channel vars the motors ignore.
 
-**Web interface and operation (versions 1.1.0 to 1.3.0)**
+**Web interface and operation (versions 1.1.0 to 1.4.0)**
 
 - ESPHome web interface (`web_server` v3, local, Digest login, web OTA disabled) with the groups Awnings, Service and Diagnostics; see [Web interface](#web-interface).
-- New per-motor online sensors, implemented in `packages/motor.yaml` with a watchdog script; see [Online sensors](#online-sensors).
+- New per-motor online sensors, implemented in `packages/motor.yaml` with a watchdog script (since 1.4.0 in `include/awning_motor.h`); see [Online sensors](#online-sensors).
 - Fallback access point with captive portal; see [Fallback access point](#fallback-access-point).
 - Diagnostic and service entities: WiFi signal, uptime, IP address, ESPHome version, restart and safe-mode buttons.
 - `esphome: project:` name and version; see [Versioning](#versioning).
@@ -814,6 +933,15 @@ Modified in October 2026. The full record is in the Git history; this is the sum
   - Position, zone and voltage are also read from damaged replies ([include/awning_frame.h](esphome/include/awning_frame.h)), anchored at the intact end of the frame and only when the voltage byte shows that the lost byte was before the position; byte-shifted frames are ignored. Moves by remote were reported by the motors all along; only the damaged replies hid them. See [Response frame](#response-frame-motor--esp32-10-bytes).
   - Dropped on the way: a repair that inserted the lost byte from the checksum (wrong values in about a quarter of the cases in a simulation).
   - Corrected: programmed motors do answer the broadcast status query (their replies had been lost); a 6-wire RJ12 cable between motors couples them through the wired inputs (see [Daisy-chaining motors](#3-daisy-chaining-motors)).
+- Version 1.4.0 (tested on this installation with motors 1 and 2; developed as 1.4.0-beta.1), see [How feedback works](#how-feedback-works):
+  - Feedback no longer goes through uartex's frame parser. All replies are read from the raw receive tap by `include/awning_frame.h`: intact blocks anywhere in a reply (also a second copy that lost its `D8`), the end of a reply checked against the motor's address (a copy that lost its ID or a channel byte), stricter plausibility (zone values, `b3`/`b5` against the running bit) and no status from contradicting copies. Motor 1 had not reported any position for some time because its replies lost the `D8` of the second copy. A host test with recorded replies and a lost-byte simulation runs in CI.
+  - Covers show opening/closing, follow the motor live (status query every 3 s while it moves, also after a move by the remote control) and no longer jump to the target and back (uartex cover patch). Newly observed: zone `0x43` while opening, `0x03` while closing; `b3`/`b5` are non-zero only while running.
+  - Polling per motor instead of a fixed interval: 15 s idle (was 30 s), 3 s moving, 5 min offline or not connected; at most one query per motor in the queue. New substitutions `fast_poll_interval`, `offline_poll_interval`, `offline_timeout` (the online timeout no longer follows `poll_interval`).
+  - `All Awnings` shows the average position and the motion of the online motors instead of an optimistic state. Its position command is now sent to each motor: the motors ignore position frames sent to ID 0, which went unnoticed in 1.3.0.
+  - Positions are restored after a reboot (uartex cover patch).
+  - SNTP as a second clock for `Last Seen`.
+  - `RS485 Raw Command` refuses programming frames while `Programming Mode` is off, and no longer sends a junk frame for malformed input.
+  - ESPHome 2026.10.0 (was 2026.9.1). With it, idle replies mostly arrive intact again.
 
 **Documentation**
 

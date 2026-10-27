@@ -21,6 +21,11 @@ void UARTExCover::dump_config()
 
 void UARTExCover::setup()
 {
+    // gumax-sunshade-esphome patch: restore the last published position
+    // after a reboot (and enable saving it), instead of starting at the
+    // default until the first reply.
+    auto restore = this->restore_state_();
+    if (restore.has_value()) restore->apply(this);
 }
 
 void UARTExCover::publish(const std::vector<uint8_t>& data)
@@ -62,27 +67,31 @@ cover::CoverTraits UARTExCover::get_traits()
 
 void UARTExCover::control(const cover::CoverCall &call)
 {
+    // gumax-sunshade-esphome patch: only an optimistic cover takes the
+    // target position at once.  Upstream also did so whenever the command
+    // was queued, which made covers with feedback jump to the target and
+    // back with the next status reply.
     if (call.get_stop()) enqueue_tx_cmd(get_command_stop());
     if (call.get_position().has_value())
     {
         auto pos = *call.get_position();
         if (pos == cover::COVER_OPEN)
         {
-            if (enqueue_tx_cmd(get_command_open()) || this->optimistic_)
+            if (enqueue_tx_cmd(get_command_open()) && this->optimistic_)
             {
                 this->position = pos;
             }
         }
         else if (pos == cover::COVER_CLOSED)
         {
-            if (enqueue_tx_cmd(get_command_close()) || this->optimistic_)
+            if (enqueue_tx_cmd(get_command_close()) && this->optimistic_)
             {
                 this->position = pos;
             }
         }
         else
         {
-            if (enqueue_tx_cmd(get_command_position(pos)) || this->optimistic_)
+            if (enqueue_tx_cmd(get_command_position(pos)) && this->optimistic_)
             {
                 this->position = pos;
             }
@@ -91,7 +100,7 @@ void UARTExCover::control(const cover::CoverCall &call)
     if (call.get_tilt().has_value())
     {
         auto tilt = *call.get_tilt();
-        if (enqueue_tx_cmd(get_command_tilt(tilt)) || this->optimistic_)
+        if (enqueue_tx_cmd(get_command_tilt(tilt)) && this->optimistic_)
         {
             this->tilt = tilt;
         }

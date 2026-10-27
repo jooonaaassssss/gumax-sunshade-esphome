@@ -13,39 +13,35 @@
 #           channel_l: "0x01"
 #           channel_h: "0x00"
 #
-# All four vars are required.  poll_interval is taken from the main file's
-# substitutions; the time source ha_time comes from the main file as well.
+# All four vars are required.  poll_interval, fast_poll_interval,
+# offline_poll_interval and offline_timeout come from the main file's
+# substitutions, the time source ha_time from the main file as well.
 #
 # Provides:
-#   • cover:          awning_${motor_id}  (uartex platform, full state + command support)
+#   • cover:          awning_${motor_id}  (uartex platform, position and operation)
 #   • binary_sensor:  awning_${motor_id}_online  ("${motor_name} Online", diagnostic)
 #   • sensor:         awning_${motor_id}_voltage  ("${motor_name} Voltage", diagnostic)
 #   • text_sensor:    awning_${motor_id}_last_seen  ("${motor_name} Last Seen", diagnostic)
 #   • button:         awning_${motor_id}_program  ("${motor_name} Program", config)
-#   • script:         awning_${motor_id}_online_watchdog  (internal timer)
-#   • globals:        awning_${motor_id}_last_seen_ts  (internal, UTC epoch)
 #
-# The Program button and the boot registration need
-# packages/programming.yaml (script prog_run, global prog_motors), the
-# online detection needs bus_rx_listeners from the main file.
+# The awning::Motor object behind them is found with
+# awning::find_motor(awning::make_key(ID, CL, CH)).
 #
-# The uartex hub (defined in the main file) dispatches incoming RX frames to
-# each cover entity via the motor-ID state filter.  Polling is handled by
-# command_update fired every ${poll_interval}.
-#
-# Online detection: every reply burst from the raw receive tap in the main
-# file whose first bytes are 0xd8, this motor's ID and channel restarts the
-# watchdog script, even if later bytes of the reply are damaged.  The motor
-# counts as online while the script runs, i.e. until 3 poll intervals pass
-# without a reply.  Motors often do not answer while they are moving, so a
-# single missed poll is normal.  Position and voltage come from intact
-# frames (uartex: header, length, checksum; ID state filter; plausibility)
-# and from damaged replies that include/awning_frame.h can still read.
-#
-# Last seen: the time of the latest reply (UTC, once ha_time is synced).
-# Published when the motor comes back online, then at most every 5 minutes
-# to keep the Home Assistant history small, and with the exact time of the
-# last reply when the motor goes offline.
+# How it works (README → How feedback works): uartex sends this cover's
+# commands and status queries.  The awning::Motor object created at boot
+# (include/awning_motor.h)
+#   - decodes every reply burst of the raw receive tap in the main file,
+#     damaged replies included (include/awning_frame.h), and publishes
+#     position, voltage, online and last seen,
+#   - follows the commands written to the bus (this cover's, the broadcast
+#     cover's, RS485 Raw Command) and reports opening/closing until the
+#     motor reports idle,
+#   - queues the status query (command_update): every poll_interval, every
+#     fast_poll_interval while the motor moves, every offline_poll_interval
+#     while it is offline.
+# Needs bus_rx_listeners, the uartex hub uartex_hub and the interval that
+# runs awning::loop_all() from the main file, and prog_run from
+# packages/programming.yaml (Program button).
 # ===========================================================================
 
 cover:
@@ -53,38 +49,17 @@ cover:
     name: "${motor_name}"
     id: awning_${motor_id}
     device_class: awning
-    optimistic: true
+    # Not optimistic: a command does not move the shown position; the
+    # cover shows opening/closing and follows the motor's replies.
+    optimistic: false
     web_server:
       sorting_group_id: sg_awnings
       sorting_weight: ${motor_id}
-    #
-    # RX frame payload bytes (after 0xd8 header, before XOR checksum):
-    #   [0] motor ID   [1] ChanL   [2] ChanH
-    #   [3-5] unknown ([4] appears to be the supply voltage in V, e.g. 0x18)
-    #   [6] pos 0–100 (0=closed, 100=open)   [7] zone (bit 0 = moving)
-    #
-    # State filter: only process frames whose first byte equals this motor's ID.
-    state:
-      offset: 0
-      data:
-        - ${motor_id}
-      match: prefix
-    # Position mapping: raw 0 (closed)→100 (open)  ↔  ESPHome 0.0 (closed)→1.0 (open)
-    state_position: !lambda |-
-      // Plausibility: a frame that lost a 0x00 byte can still pass the XOR
-      // checksum, shifted by one byte.  Byte [4] (supply voltage, 0x17/0x18
-      // observed) then reads 0.  Ignore such frames: returning the current
-      // position changes nothing.
-      if (data[4] < 16 || data[4] > 40 || data[6] > 100) {
-        ESP_LOGD("awning", "Motor ${motor_id}  implausible frame ignored");
-        return id(awning_${motor_id}).position;
-      }
-      ESP_LOGD("awning", "Motor ${motor_id}  pos=%d%%  running=%d",
-               data[6], data[7] & 0x01);
-      // Supply voltage (byte [4], meaning not confirmed): publish on change.
-      if (id(awning_${motor_id}_voltage).state != data[4])
-        id(awning_${motor_id}_voltage).publish_state(data[4]);
-      return data[6] / 100.0f;
+    # Feedback comes from awning::Motor (see above), not from uartex's frame
+    # parser, which misses damaged replies.  state_position only enables
+    # position support in uartex (the traits require it) and returns the
+    # current position, so frames parsed by uartex change nothing.
+    state_position: !lambda "return id(awning_${motor_id}).position;"
     #
     # TX payload bytes (uartex auto-prepends 0x9a header, appends XOR checksum):
     #
@@ -97,27 +72,10 @@ cover:
     command_position: !lambda |-
       uint8_t pct = (uint8_t)(x * 100.0f + 0.5f);
       return {{(uint8_t)${motor_id}, ${channel_l}, ${channel_h}, 0xdd, pct}, {}};
+    # Status query, queued by awning::Motor (no fixed update interval).
     command_update: !lambda |-
       return {{(uint8_t)${motor_id}, ${channel_l}, ${channel_h}, 0xcc, 0x00}};
-    update_interval: ${poll_interval}
-
-script:
-  # Restarted by every reply; runs out after 3 poll intervals of silence.
-  - id: awning_${motor_id}_online_watchdog
-    mode: restart
-    then:
-      - delay: !lambda "return 3 * id(awning_${motor_id}).get_update_interval();"
-      # Gone offline: report the exact time of the last frame.
-      - lambda: |-
-          const time_t ts = id(awning_${motor_id}_last_seen_ts);
-          if (ts != 0)
-            id(awning_${motor_id}_last_seen).publish_state(
-                ESPTime::from_epoch_utc(ts).strftime("%Y-%m-%dT%H:%M:%SZ"));
-
-globals:
-  - id: awning_${motor_id}_last_seen_ts
-    type: time_t
-    initial_value: "0"
+    update_interval: never
 
 binary_sensor:
   - platform: template
@@ -125,14 +83,16 @@ binary_sensor:
     id: awning_${motor_id}_online
     device_class: connectivity
     entity_category: diagnostic
-    # Off at boot until the first reply arrives.
-    lambda: "return id(awning_${motor_id}_online_watchdog).is_running();"
+    # Off at boot until the first reply; off after offline_timeout without one.
+    lambda: |-
+      const auto *motor = awning::find_motor(awning::make_key(${motor_id}, ${channel_l}, ${channel_h}));
+      return motor != nullptr && motor->online();
     web_server:
       sorting_group_id: sg_diagnostics
       sorting_weight: ${motor_id}
 
-# Byte [4] of the status frame; 0x17/0x18 (23/24) observed.  Likely the
-# motor's internal DC supply, not confirmed.  Published by state_position.
+# Byte 5 of the reply; 0x17/0x18 (23/24) observed.  Likely the motor's
+# internal DC supply, not confirmed.  Published on change by awning::Motor.
 sensor:
   - platform: template
     name: "${motor_name} Voltage"
@@ -159,52 +119,28 @@ text_sensor:
       sorting_group_id: sg_diagnostics
       sorting_weight: ${motor_id}.2
 
-# Programs the motor that is alone on the bus with this motor's ID and
-# channel (see packages/programming.yaml; needs Programming Mode).  The
-# motor is registered at boot so that Scan Bus queries it.
 esphome:
   on_boot:
     - lambda: |-
-        id(prog_motors).push_back((uint32_t(${motor_id}) << 16) |
-                                  (uint32_t(${channel_l}) << 8) | uint32_t(${channel_h}));
-        // Online and last seen: any reply that starts with this motor's ID
-        // and channel, even if later bytes are damaged.  Position and
-        // voltage of a damaged reply: see include/awning_frame.h (intact
-        // frames go through uartex and state_position).
-        id(bus_rx_listeners).push_back([](const std::vector<uint8_t> &burst) {
-          uint32_t key;
-          if (!awning::reply_key(burst, key) ||
-              key != awning::make_key(${motor_id}, ${channel_l}, ${channel_h}))
-            return;
-          awning::Status status;
-          if (awning::decode_damaged(burst, status)) {
-            ESP_LOGD("awning", "Motor ${motor_id}  pos=%d%%  running=%d  (damaged reply)",
-                     status.position, status.zone & 0x01);
-            auto *cover = id(awning_${motor_id});
-            const float position = status.position / 100.0f;
-            if (cover->position != position) {
-              cover->position = position;
-              cover->publish_state();
-            }
-            if (id(awning_${motor_id}_voltage).state != status.voltage)
-              id(awning_${motor_id}_voltage).publish_state(status.voltage);
-          }
-          // stop() + execute() instead of mode: restart avoids a
-          // "restarting" DEBUG line for every reply.
-          const bool was_online = id(awning_${motor_id}_online_watchdog).is_running();
-          id(awning_${motor_id}_online_watchdog).stop();
-          id(awning_${motor_id}_online_watchdog).execute();
-          auto now = id(ha_time).utcnow();
-          if (now.is_valid()) {
-            static time_t published = 0;
-            id(awning_${motor_id}_last_seen_ts) = now.timestamp;
-            if (!was_online || now.timestamp - published >= 300) {
-              published = now.timestamp;
-              id(awning_${motor_id}_last_seen).publish_state(now.strftime("%Y-%m-%dT%H:%M:%SZ"));
-            }
-          }
-        });
+        static_assert(awning::duration_ms("${poll_interval}") > 0, "poll_interval: use e.g. 15s");
+        static_assert(awning::duration_ms("${fast_poll_interval}") > 0, "fast_poll_interval: use e.g. 3s");
+        static_assert(awning::duration_ms("${offline_poll_interval}") > 0, "offline_poll_interval: use e.g. 5min");
+        static_assert(awning::duration_ms("${offline_timeout}") > 0, "offline_timeout: use e.g. 90s");
+        awning::Timing timing{};
+        timing.poll_ms = awning::duration_ms("${poll_interval}");
+        timing.fast_poll_ms = awning::duration_ms("${fast_poll_interval}");
+        timing.offline_poll_ms = awning::duration_ms("${offline_poll_interval}");
+        timing.offline_ms = awning::duration_ms("${offline_timeout}");
+        auto *motor = new awning::Motor(${motor_id}, ${channel_l}, ${channel_h}, timing);
+        motor->set_cover(id(awning_${motor_id}));
+        motor->set_voltage_sensor(id(awning_${motor_id}_voltage));
+        motor->set_last_seen_sensor(id(awning_${motor_id}_last_seen));
+        motor->set_clock(id(ha_time));
+        id(bus_rx_listeners).push_back([motor](const std::vector<uint8_t> &burst) { motor->on_burst(burst); });
+        id(uartex_hub).add_on_write_callback([motor](const uint8_t *data, const uint16_t len) { motor->on_write(data, len); });
 
+# Programs the motor that is alone on the bus with this motor's ID and
+# channel (see packages/programming.yaml; needs Programming Mode).
 button:
   - platform: template
     name: "${motor_name} Program"

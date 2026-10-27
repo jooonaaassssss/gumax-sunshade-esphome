@@ -1,6 +1,7 @@
-# Validate and compile the ESPHome configuration on every push and PR.
-# Uses the placeholder secrets from secrets.yaml.example; no firmware is
-# published (no artifacts, no releases).
+# Validate and compile the ESPHome configuration and run the host test of
+# the bus logic on every push and PR.  Uses the placeholder secrets from
+# secrets.yaml.example; no firmware is published (no artifacts, no
+# releases).
 name: Validate
 
 on:
@@ -15,9 +16,22 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ESPHOME_VERSION: "2026.9.1"
+  ESPHOME_VERSION: "2026.10.0"
 
 jobs:
+  # Host test of the bus logic in esphome/include (decoding, motor state,
+  # polling); see tests/awning_test.cpp.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Build and run tests/awning_test.cpp
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror -I esphome/include tests/awning_test.cpp -o awning_test
+          ./awning_test
+
   validate:
     runs-on: ubuntu-latest
     defaults:

@@ -2,9 +2,10 @@
 # packages/programming.yaml  –  program motor IDs and channels from the UI
 #
 # Included once by awning-motor.yaml (no vars).  Required by
-# packages/motor.yaml: every motor registers its ID and channel in
-# prog_motors at boot, and its "<motor_name> Program" button runs prog_run
-# with that ID and channel, so the user only picks which motor is on the bus.
+# packages/motor.yaml: every motor's "<motor_name> Program" button runs
+# prog_run with that motor's ID and channel, so the user only picks which
+# motor is on the bus.  The configured motors come from awning::motors()
+# (include/awning_motor.h).
 #
 # Provides:
 #   • switch:       prog_mode    ("Programming Mode", config, off at boot,
@@ -19,9 +20,13 @@
 # (ID 0) and one status query per configured motor, so a motor is found even
 # if its reply to one of the queries is lost.  Replies are identified by
 # their first bytes (0xd8, ID, CL, CH), which survive even when later bytes
-# are damaged.  Programming is only allowed when exactly one motor answered
-# and no frame was garbled.  Afterwards prog_run queries the new ID to
-# confirm.
+# are damaged, and by intact status blocks after a 0xd8
+# (awning::reply_keys).  Programming is only allowed when exactly one motor
+# answered and no frame was garbled.  Afterwards prog_run queries the new ID
+# to confirm.
+#
+# RS485 Raw Command (main file) refuses programming frames while
+# Programming Mode is off.
 #
 # Limitations: a programmed motor whose ID/channel is not in this
 # configuration is only found through the broadcast query.  Two motors with
@@ -33,10 +38,7 @@
 # ===========================================================================
 
 globals:
-  # Configured motors as (ID << 16 | CL << 8 | CH), filled by motor.yaml.
-  - id: prog_motors
-    type: std::vector<uint32_t>
-  # Distinct replies seen while collecting, same key format.
+  # Distinct replies seen while collecting, as awning::make_key(ID, CL, CH).
   - id: prog_seen
     type: std::vector<uint32_t>
   # Receive errors while collecting (garbled frames).
@@ -82,10 +84,10 @@ esphome:
         // Reply bursts from the raw receive tap (main file): the first bytes
         // identify the motor even if later bytes of the reply are damaged.
         id(bus_rx_listeners).push_back([](const std::vector<uint8_t> &burst) {
-          uint32_t key;
-          if (!id(prog_collect) || !awning::reply_key(burst, key)) return;
+          if (!id(prog_collect)) return;
           auto &seen = id(prog_seen);
-          if (std::find(seen.begin(), seen.end(), key) == seen.end()) seen.push_back(key);
+          for (const uint32_t key : awning::reply_keys(burst))
+            if (std::find(seen.begin(), seen.end(), key) == seen.end()) seen.push_back(key);
         });
         id(uartex_hub).add_on_error_callback([](const uartex::ERROR error) {
           if (id(prog_collect)) id(prog_errors)++;
@@ -220,13 +222,13 @@ script:
             # Iteration 0: broadcast query (every motor).  Then one query per
             # configured motor.
             - repeat:
-                count: !lambda "return id(prog_motors).size() + 1;"
+                count: !lambda "return awning::motors().size() + 1;"
                 then:
                   - script.execute:
                       id: prog_exchange
-                      target_id: !lambda "return iteration == 0 ? 0 : int(id(prog_motors)[iteration - 1] >> 16);"
-                      chan_l: !lambda "return iteration == 0 ? 0 : int((id(prog_motors)[iteration - 1] >> 8) & 0xff);"
-                      chan_h: !lambda "return iteration == 0 ? 0 : int(id(prog_motors)[iteration - 1] & 0xff);"
+                      target_id: !lambda "return iteration == 0 ? 0 : int(awning::key_id(awning::motors()[iteration - 1]->key()));"
+                      chan_l: !lambda "return iteration == 0 ? 0 : int(awning::key_chan_l(awning::motors()[iteration - 1]->key()));"
+                      chan_h: !lambda "return iteration == 0 ? 0 : int(awning::key_chan_h(awning::motors()[iteration - 1]->key()));"
                       cmd1: 0xcc
                       cmd2: 0x00
                       listen_ms: 1000
@@ -265,7 +267,7 @@ script:
                 else
                   result = std::to_string(seen.size()) + (seen.size() == 1 ? " motor: " : " motors: ") + found;
 
-                const uint32_t target = (uint32_t(target_id) << 16) | (uint32_t(chan_l) << 8) | uint32_t(chan_h);
+                const uint32_t target = awning::make_key(target_id, chan_l, chan_h);
                 id(prog_target) = describe(target);
                 id(prog_go) = false;
                 std::string status;
@@ -307,7 +309,7 @@ script:
                       listen_ms: 3000
                   - script.wait: prog_exchange
                   - lambda: |-
-                      const uint32_t target = (uint32_t(target_id) << 16) | (uint32_t(chan_l) << 8) | uint32_t(chan_h);
+                      const uint32_t target = awning::make_key(target_id, chan_l, chan_h);
                       const auto &seen = id(prog_seen);
                       const bool ok = std::find(seen.begin(), seen.end(), target) != seen.end();
                       const std::string status = ok

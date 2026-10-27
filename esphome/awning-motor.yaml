@@ -28,7 +28,11 @@ substitutions:
   uart_flow_control_pin: GPIO21   # RS485 driver enable (DE/RE)
 
   # ── Polling ───────────────────────────────────────────────────────────────
-  poll_interval: 30s        # How often to query each motor for status
+  # Status queries per motor (README → How feedback works):
+  poll_interval: 15s          # idle motor
+  fast_poll_interval: 3s      # while the motor moves (live position)
+  offline_poll_interval: 5min # motor offline, e.g. not connected
+  offline_timeout: 90s        # no reply for this long → Online off
 
   # ── Channel bytes ─────────────────────────────────────────────────────────
   # These must match the channel programmed into each motor (see README).
@@ -45,8 +49,8 @@ substitutions:
 # ---------------------------------------------------------------------------
 # Per-motor and broadcast package includes
 #
-# Each motor_N entry creates one cover entity (awning_N) that is polled every
-# ${poll_interval}.  motor_id and the channel bytes must match what has been
+# Each motor_N entry creates one cover entity (awning_N) and its diagnostic
+# sensors.  motor_id and the channel bytes must match what has been
 # programmed into the physical motor (README → "Addressing motors").
 #
 # This installation:  motors 1–4 = IDs 1–4 on channel 1,
@@ -116,14 +120,17 @@ packages:
 esphome:
   name: ${device_name}
   friendly_name: ${friendly_name}
-  # Reply decoding helpers (online detection, damaged replies).
+  # Bus logic (README → How feedback works): reply decoding, motor state
+  # and polling, entity glue.
   includes:
     - include/awning_frame.h
+    - include/awning_motion.h
+    - include/awning_motor.h
   # Reported to Home Assistant and shown in the device info.
   # Bump the version on every firmware-relevant change (README → Versioning).
   project:
     name: jooonaaassssss.gumax-sunshade-esphome
-    version: "1.3.0"
+    version: "1.4.0"
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -163,11 +170,15 @@ wifi:
 
 captive_portal:
 
-# Clock from Home Assistant (synced over the native API), used for the
-# per-motor "Last Seen" sensors.  No time until Home Assistant connects.
+# Clock for the per-motor "Last Seen" sensors (UTC).  Both sources set the
+# system clock: Home Assistant over the native API, SNTP from the internet
+# (pool.ntp.org) when Home Assistant is not connected.  No time until one
+# of them has synchronised.
 time:
   - platform: homeassistant
     id: ha_time
+  - platform: sntp
+    id: sntp_time
 
 # ---------------------------------------------------------------------------
 # Web interface  –  http://${device_name}.local/  (LAN only, see README)
@@ -214,11 +225,11 @@ uart:
   flow_control_pin: ${uart_flow_control_pin}
   baud_rate: 2400
   # Raw receive tap (ESPHome's UART debugger; the lambda is its only output).
-  # Bytes without a gap of more than 8 ms form one burst, i.e. one reply.
-  # Every burst is logged at DEBUG, damaged ones included, and passed to the
-  # bus_rx_listeners: per motor online detection, last seen and the position
-  # of damaged replies (include/awning_frame.h), and the bus scan.  Intact
-  # frames are decoded by uartex as before.
+  # Bytes without a gap of more than 8 ms form one burst, i.e. one reply
+  # (both copies).  Every burst is logged at DEBUG, damaged ones included,
+  # and passed to the bus_rx_listeners: the awning::Motor of each motor
+  # (position, operation, voltage, online, last seen; include/awning_motor.h)
+  # and the bus scan (packages/programming.yaml).
   debug:
     direction: RX
     dummy_receiver: false
@@ -227,22 +238,34 @@ uart:
     sequence:
       - lambda: |-
           ESP_LOGD("rs485", "RX %s", format_hex_pretty(bytes).c_str());
-          uint32_t key;
-          if (!awning::reply_key(bytes, key)) return;
           for (auto &listener : id(bus_rx_listeners)) listener(bytes);
 
 globals:
   # Registered at boot by packages/motor.yaml and packages/programming.yaml.
-  # Argument: one reply burst starting with 0xd8 (see the uart: debug block).
+  # Argument: one burst of received bytes (see the uart: debug block).
   - id: bus_rx_listeners
     type: std::vector<std::function<void(const std::vector<uint8_t> &)>>
+  # Payload parsed from RS485 Raw Command; empty if refused.
+  - id: raw_payload
+    type: std::vector<uint8_t>
+
+# Motor state, poll schedule and the All Awnings state (include/awning_motor.h).
+interval:
+  - interval: 200ms
+    then:
+      - lambda: "awning::loop_all();"
 
 # ---------------------------------------------------------------------------
-# UARTEx hub – declarative RS485 frame parsing and command dispatch.
+# UARTEx hub – RS485 command queue.
 #
-# RX frame (motor → ESP):  [0xd8] [ID] [CL] [CH] [b4] [b5] [b6] [pos] [zone] [chk]
+# uartex sends the cover commands, the status queries and the frames of
+# RS485 Raw Command and the programming scripts, one every tx_delay.  Its
+# write callback lets each awning::Motor follow the commands on the bus.
+# Its frame parser only feeds the RS485 Error sensor: replies are decoded
+# from the raw receive tap (uart: debug), which also reads damaged replies.
+#
+# RX frame (motor → ESP):  [0xd8] [ID] [CL] [CH] [b3] [volt] [b5] [pos] [zone] [chk]
 #   Header 0xd8 │ 8 payload bytes │ XOR checksum (payload bytes only)
-#   Payload offsets: [0]=ID  [6]=pos(0–100)  [7]=zone(bit0=moving)
 #
 # TX frame (ESP → motor):  [0x9a] [ID] [CL] [CH] [Cmd1] [Cmd2] [chk]
 #   Header 0x9a │ 5 payload bytes │ XOR checksum (payload bytes only)
@@ -295,6 +318,10 @@ uartex:
 #   Awning 5 status      : 9a 05 02 00 cc 00
 #   All UP               : 9a 00 00 00 0a dd
 #   Program ID 2, ch. 1  : 9a 02 01 00 aa aa   (only one motor on the bus!)
+#
+# Programming frames (aa aa) are refused while Programming Mode is off
+# (every connected motor would take the new ID); with Programming Mode on
+# they restart its 10-minute timer.  Malformed input is logged and not sent.
 # ---------------------------------------------------------------------------
 text:
   - platform: template
@@ -309,27 +336,27 @@ text:
       sorting_weight: 1
     on_value:
       then:
-        - uartex.write:
-            data: !lambda |-
-              const char *s = x.c_str();
-              std::vector<uint8_t> frame;
-              while (*s) {
-                while (*s == ' ') s++;
-                if (!*s) break;
-                char *end;
-                long val = strtol(s, &end, 16);
-                if (end == s) break;
-                frame.push_back((uint8_t)val);
-                s = end;
+        - lambda: |-
+            auto payload = awning::parse_hex_payload(x);
+            if (payload.empty()) {
+              ESP_LOGW("awning", "RS485 Raw Command: expected \"9a ID CL CH Cmd1 Cmd2\" in hex, got \"%s\"",
+                       x.c_str());
+            } else if (awning::parse_command(payload.data()).command == awning::Command::PROGRAM) {
+              if (id(prog_mode).state) {
+                id(prog_mode_timer).execute();
+              } else {
+                ESP_LOGW("awning", "RS485 Raw Command: programming frame refused, Programming Mode is off");
+                id(prog_status).publish_state("Refused raw programming frame: switch on Programming Mode first");
+                payload.clear();
               }
-              // Strip the leading 0x9a header byte – uartex adds it automatically.
-              if (!frame.empty() && frame[0] == 0x9a) frame.erase(frame.begin());
-              if (frame.size() != 5) {
-                ESP_LOGW("awning", "Expected 5 payload bytes (or 6 with 9a), got %d",
-                         (int)frame.size());
-                return {};
-              }
-              return frame;
+            }
+            id(raw_payload) = payload;
+        - if:
+            condition:
+              lambda: "return !id(raw_payload).empty();"
+            then:
+              - uartex.write:
+                  data: !lambda "return id(raw_payload);"
 
 # ---------------------------------------------------------------------------
 # The per-motor covers (awning_1 … awning_N) and the all-awnings broadcast

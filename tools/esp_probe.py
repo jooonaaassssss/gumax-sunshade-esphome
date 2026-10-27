@@ -9,7 +9,8 @@ Examples:
   # Who is on the bus? An unprogrammed motor answers as ID 0.
   python tools/esp_probe.py "9a 00 00 00 cc 00"
 
-  # Program the only connected motor as ID 2 on channel 1, then verify.
+  # Program the only connected motor as ID 2 on channel 1, then verify
+  # (switch on "Programming Mode" first, otherwise the frame is refused).
   python tools/esp_probe.py "9a 02 01 00 aa aa" "9a 02 01 00 cc 00"
 
   # Close motor 4 for six seconds, then stop it.
