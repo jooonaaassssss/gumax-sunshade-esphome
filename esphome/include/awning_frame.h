@@ -225,7 +225,11 @@ struct CommandFrame {
   uint32_t key;     // ID 0: broadcast to every motor
   Command command;
   uint8_t target;   // position for Command::POSITION (0 = closed … 100 = open)
-  bool addresses(uint32_t motor) const { return key_id(key) == 0 || key == motor; }
+  // The motor acts on this frame.  The motors ignore position frames sent
+  // to ID 0 (README → Command frame).
+  bool addresses(uint32_t motor) const {
+    return key == motor || (key_id(key) == 0 && command != Command::POSITION);
+  }
 };
 
 // Command payload: ID CL CH Cmd1 Cmd2 (without header and checksum).

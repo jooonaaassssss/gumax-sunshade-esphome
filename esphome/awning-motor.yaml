@@ -130,7 +130,7 @@ esphome:
   # Bump the version on every firmware-relevant change (README → Versioning).
   project:
     name: jooonaaassssss.gumax-sunshade-esphome
-    version: "1.4.0"
+    version: "1.4.1"
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -138,6 +138,11 @@ esp32:
   flash_size: 16MB
   framework:
     type: esp-idf
+    advanced:
+      # Link only the generic flash driver, which this board's flash chip
+      # uses (the boot log suggests it), and save the IRAM of the vendor
+      # drivers.  Other boards: remove the line or set what the log suggests.
+      flash_chip: generic
 
 logger:
   level: DEBUG

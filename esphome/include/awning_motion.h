@@ -58,8 +58,12 @@ class MotorState {
   explicit MotorState(const Timing &timing) : timing_(timing) {}
 
   // A command for this motor was sent.  current: the position shown before
-  // (0–100), used for the direction when no reply has been seen yet.
+  // (0–100), used for the direction when no status has been read yet.
+  // Ignored for a motor that has not answered since boot (e.g. not
+  // connected): no reply would end the motion it shows.
   void command(uint32_t now, Command cmd, uint8_t target, uint8_t current) {
+    if (!seen_)
+      return;
     const uint8_t from = has_position_ ? position_ : current;
     switch (cmd) {
       case Command::OPEN:
@@ -122,11 +126,11 @@ class MotorState {
   bool online(uint32_t now) const { return online_ && now - last_reply_ < timing_.offline_ms; }
   bool seen() const { return seen_; }
 
-  // Fast polling while a motor that has answered since boot moves (it may
-  // be silent, and so offline, while running); motors that never answered,
-  // e.g. ones not connected, are only polled at the offline interval.
+  // Fast polling while the motor moves (it may be silent, and so offline,
+  // while running).  Motors that never answered, e.g. ones not connected,
+  // never move here (see command()) and are polled at the offline interval.
   uint32_t poll_interval(uint32_t now) const {
-    if (active_ && seen_)
+    if (active_)
       return timing_.fast_poll_ms;
     return online(now) ? timing_.poll_ms : timing_.offline_poll_ms;
   }

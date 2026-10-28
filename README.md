@@ -52,7 +52,7 @@ The Gumax motors are physically identical to AOK-E AM68. The only difference is 
 - RJ12 (6P6C) patch cables and a crimping tool, or pre-made cables
 
 **Software**
-- [ESPHome](https://esphome.io/guides/installing_esphome) 2026.10 (tested with 2026.10.0). The uartex component is bundled in [esphome/components/uartex](esphome/components/uartex) (patched copy of tag `v260904`, see [uartex](#uartex-bundled-patched-copy)); update ESPHome and uartex together.
+- [ESPHome](https://esphome.io/guides/installing_esphome) 2026.10 (tested with 2026.10.1). The uartex component is bundled in [esphome/components/uartex](esphome/components/uartex) (patched copy of tag `v260904`, see [uartex](#uartex-bundled-patched-copy)); update ESPHome and uartex together.
 - Home Assistant (optional but recommended for the cover UI; it is also a clock for the `Last Seen` sensors, next to SNTP)
 - Python 3 with [aioesphomeapi](https://pypi.org/project/aioesphomeapi/), only for [tools/esp_probe.py](tools/esp_probe.py)
 
@@ -186,7 +186,8 @@ pin 5 stays unconnected.
 ### 5. Other boards
 
 Any ESP32 with a TTL-to-RS485 converter works. Change the `esp32:` block to your
-board and set the pins in `substitutions:`.
+board (remove `flash_chip: generic` under `advanced:`, or set the value the
+boot log suggests) and set the pins in `substitutions:`.
 
 | Converter pin | ESP32 pin | Notes |
 |---|---|---|
@@ -386,6 +387,7 @@ The firmware treats other zone values, and `b3`/`b5` that do not match the
 running bit, as implausible: such a reply only counts as a sign of life (see
 [How feedback works](#how-feedback-works)). If a motor shows other values,
 the log has `Motor N  reply not readable` after its `RX D8 …` line.
+
 ### Position conventions
 
 Raw position 0 is closed and 100 is open, confirmed on this installation in
@@ -590,7 +592,9 @@ byte `0x00` of a single copy whose checksum happens to be a valid zone.
 **Opening and closing.** When a command for a motor goes out on the bus
 (its cover, `All Awnings` or `RS485 Raw Command`), its cover shows opening or
 closing at once (direction from the target and the current position); the
-position stays at the motor's real value and follows its replies. The move
+position stays at the motor's real value and follows its replies. Commands
+for a motor that has not answered since boot (e.g. not connected) and
+position frames to ID 0 (which the motors ignore) show no motion. The move
 ends with the first reply without the running bit, except that a reply
 "idle at the start position" within 5 s after the command is ignored (the
 motor may not have started yet), or after 2 minutes without a running
@@ -790,7 +794,10 @@ Three changes, each marked `gumax-sunshade-esphome patch`:
 
 To update uartex: copy the hub files and `cover/` of the new tag over this
 folder (without the upstream README), re-apply the patches, update the tag
-and commit here, and re-test.
+and commit here, and re-test. The next tag, `v261021`, changes nothing in the
+hub or the cover platform (only uartex's README), so the copy stays at
+`v260904`.
+
 ---
 
 ## Tools
@@ -846,12 +853,13 @@ README-only or CI-only changes do not change the firmware and need no bump.
 push and pull request:
 
 - job `test`: builds and runs [tests/awning_test.cpp](tests/awning_test.cpp)
-  with g++ (`-Wall -Wextra -Werror`): reply decoding with recorded replies
+  with g++ (`-Wall -Wextra -Werror`, AddressSanitizer and
+  UndefinedBehaviorSanitizer): reply decoding with recorded replies
   and the lost-byte simulation, command parsing, motor state and polling
   (see [How feedback works](#how-feedback-works)). Locally:
   `g++ -std=c++17 -I esphome/include tests/awning_test.cpp -o awning_test && ./awning_test`.
 - job `validate`:
-  1. installs ESPHome **2026.10.0** (pinned, matching the tested version),
+  1. installs ESPHome **2026.10.1** (pinned, matching the tested version),
   2. copies `secrets.yaml.example` to `secrets.yaml` (placeholders only),
   3. runs `esphome config` and `esphome compile` in `esphome/`.
 
@@ -876,7 +884,7 @@ change `ESPHOME_VERSION` in the workflow together with the version under
 | `Awning N Last Seen` stays empty | No time yet: neither Home Assistant nor SNTP has synchronised since the last reboot |
 | `RS485 Error` stays on an error | Disturbed frames: check A/B wiring, the 120R termination and that nothing else transmits on the bus |
 | A cover shows "open" although its motor never answered | ESPHome covers have no "unknown" state; a motor that never answered keeps the default (open). Check `Awning N Online` |
-| A cover shows opening/closing, but the motor does not move | The motor ignored the command; the cover returns to idle 5 s after the command with the next reply. Position frames to ID 0 are always ignored, see [Step 3](#step-3--all-awnings-cover) |
+| A cover shows opening/closing, but the motor does not move | The motor ignored the command; the cover returns to idle 5 s after the command with the next reply |
 | `RS485 Raw Command` sends nothing | Malformed input (log warning), or a programming frame while `Programming Mode` is off |
 | OTA upload refused | The uploader's `api_key` differs from the one in the firmware; see [Firmware updates (OTA)](#firmware-updates-ota) |
 | A remote channel moves several motors | The motors are linked by a 6-wire RJ12 cable, which connects their wired inputs (pins 2–4); see [Daisy-chaining motors](#3-daisy-chaining-motors) |
@@ -913,7 +921,7 @@ Modified in October 2026. The full record is in the Git history; this is the sum
 - `poll_interval` now takes effect: a package default in `motor.yaml` shadowed the value from the main file.
 - The package templates no longer have defaults for required values, so a missing `motor_id` fails the build instead of silently creating `awning_1`. The broadcast cover no longer takes channel vars the motors ignore.
 
-**Web interface and operation (versions 1.1.0 to 1.4.0)**
+**Web interface and operation (versions 1.1.0 to 1.4.1)**
 
 - ESPHome web interface (`web_server` v3, local, Digest login, web OTA disabled) with the groups Awnings, Service and Diagnostics; see [Web interface](#web-interface).
 - New per-motor online sensors, implemented in `packages/motor.yaml` with a watchdog script (since 1.4.0 in `include/awning_motor.h`); see [Online sensors](#online-sensors).
@@ -942,6 +950,10 @@ Modified in October 2026. The full record is in the Git history; this is the sum
   - SNTP as a second clock for `Last Seen`.
   - `RS485 Raw Command` refuses programming frames while `Programming Mode` is off, and no longer sends a junk frame for malformed input.
   - ESPHome 2026.10.0 (was 2026.9.1). With it, idle replies mostly arrive intact again.
+- Version 1.4.1 (tested on this installation):
+  - Commands for a motor that has not answered since boot (e.g. not connected) no longer show opening/closing; after `All Awnings` open or close, the covers of unconnected motors showed it for 2 minutes. Position frames to ID 0, which the motors ignore, no longer show motion either.
+  - ESPHome 2026.10.1; only the generic flash driver is linked (`esp32: framework: advanced: flash_chip: generic`, suggested by the boot log), which saves IRAM.
+  - CI: the host test runs with AddressSanitizer and UndefinedBehaviorSanitizer; GitHub Actions updated (checkout v7, setup-python v7, cache v6).
 
 **Documentation**
 

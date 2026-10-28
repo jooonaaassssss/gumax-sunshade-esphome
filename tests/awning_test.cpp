@@ -188,6 +188,11 @@ static void test_commands() {
   CHECK(parse_sent_command(hex("9a 01 01 00 0a dd d7").data(), 7, f));
   CHECK(f.addresses(M1) && !f.addresses(M2));
   CHECK(!parse_sent_command(hex("d8 01 01 00 0a dd d7").data(), 7, f));
+  // The motors ignore position frames sent to ID 0.
+  CHECK(parse_sent_command(hex("9a 00 00 00 dd 32 ef").data(), 7, f));
+  CHECK(f.command == Command::POSITION && !f.addresses(M1) && !f.addresses(M2));
+  CHECK(parse_sent_command(hex("9a 00 01 00 cc 00 cd").data(), 7, f));
+  CHECK(f.command == Command::STATUS && f.addresses(M1));
 }
 
 static_assert(duration_ms("500ms") == 500, "ms");
@@ -325,12 +330,20 @@ static void test_online_wrap() {
 
 static void test_unknown_motor() {
   MotorState m(timing());
-  // A motor that never answered (not connected): commands do not start fast
-  // polling; the direction comes from the shown position.
+  // A motor that never answered (not connected): commands show no motion
+  // and do not start fast polling.
   m.command(1000, Command::POSITION, 20, 80);
-  CHECK(m.motion() == Motion::CLOSING);
-  CHECK(m.poll_interval(1000) == 300000);
+  CHECK(m.motion() == Motion::IDLE && !m.moving());
+  m.command(2000, Command::OPEN, 0, 80);
+  CHECK(m.motion() == Motion::IDLE && !m.moving());
+  CHECK(m.poll_interval(2000) == 300000);
   CHECK(!m.has_position());
+  // Once it answers, commands count, with the direction from the shown
+  // position until a status has been read.
+  m.reply(3000);
+  m.command(4000, Command::POSITION, 20, 80);
+  CHECK(m.motion() == Motion::CLOSING && m.moving());
+  CHECK(m.poll_interval(4000) == 3000);
 }
 
 int main() {

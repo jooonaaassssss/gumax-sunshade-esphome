@@ -16,20 +16,22 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ESPHOME_VERSION: "2026.10.0"
+  ESPHOME_VERSION: "2026.10.1"
 
 jobs:
   # Host test of the bus logic in esphome/include (decoding, motor state,
-  # polling); see tests/awning_test.cpp.
+  # polling); see tests/awning_test.cpp.  AddressSanitizer and
+  # UndefinedBehaviorSanitizer catch out-of-bounds reads in the decoder.
   test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Build and run tests/awning_test.cpp
         run: |
-          g++ -std=c++17 -Wall -Wextra -Werror -I esphome/include tests/awning_test.cpp -o awning_test
+          g++ -std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
+            -I esphome/include tests/awning_test.cpp -o awning_test
           ./awning_test
 
   validate:
@@ -39,15 +41,15 @@ jobs:
         working-directory: esphome
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.13"
 
       - name: Cache PlatformIO and ESP-IDF toolchains
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.platformio
