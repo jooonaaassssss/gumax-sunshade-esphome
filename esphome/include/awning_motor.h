@@ -54,8 +54,9 @@ inline esphome::cover::CoverOperation to_operation(Motion motion) {
 
 class Motor {
  public:
-  Motor(uint8_t id, uint8_t chan_l, uint8_t chan_h, const Timing &timing)
-      : id_(id), key_(make_key(id, chan_l, chan_h)), state_(timing) {
+  // reversed: the motor reports raw position 0 when open (open_percent()).
+  Motor(uint8_t id, uint8_t chan_l, uint8_t chan_h, bool reversed, const Timing &timing)
+      : id_(id), key_(make_key(id, chan_l, chan_h)), reversed_(reversed), state_(timing) {
     motors().push_back(this);
   }
 
@@ -76,6 +77,8 @@ class Motor {
   bool seen() const { return this->state_.seen(); }
   bool has_position() const { return this->state_.has_position(); }
   Motion motion() const { return this->state_.motion(); }
+  // Percent open (0–100) → raw position byte for a position command.
+  uint8_t raw_position(uint8_t percent_open) const { return open_percent(percent_open, this->reversed_); }
 
   // One burst of the raw receive tap.
   void on_burst(const std::vector<uint8_t> &burst) {
@@ -87,7 +90,9 @@ class Motor {
     const bool was_online = this->state_.online(now);
     this->state_.reply(now);
     if (seen == Seen::STATUS || seen == Seen::REPAIRED) {
-      ESP_LOGD("awning", "Motor %u  pos=%u%%  running=%u  zone=0x%02X%s", this->id_, status.position,
+      const uint8_t raw = status.position;
+      status.position = open_percent(raw, this->reversed_);
+      ESP_LOGD("awning", "Motor %u  open=%u%% (raw %u)  running=%u  zone=0x%02X%s", this->id_, status.position, raw,
                status.running(), status.zone, seen == Seen::REPAIRED ? "  (damaged reply)" : "");
       this->state_.status(now, status);
       if (this->voltage_ != nullptr && status.voltage != 0 && this->voltage_->state != status.voltage)
@@ -111,7 +116,7 @@ class Motor {
       return;
     }
     const uint8_t current = uint8_t(this->cover_->position * 100.0f + 0.5f);
-    this->state_.command(now, f.command, f.target, current);
+    this->state_.command(now, f.command, open_percent(f.target, this->reversed_), current);
     this->publish_cover_();
   }
 
@@ -162,6 +167,7 @@ class Motor {
 
   uint8_t id_;
   uint32_t key_;
+  bool reversed_;
   MotorState state_;
   esphome::cover::Cover *cover_{nullptr};
   esphome::PollingComponent *poller_{nullptr};

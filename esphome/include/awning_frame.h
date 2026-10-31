@@ -52,19 +52,26 @@ inline uint8_t xor_of(const uint8_t *data, size_t len) {
 inline bool is_voltage(uint8_t v) { return v >= 20 && v <= 30; }
 
 // Zone byte values observed: 0x00 and 0x02 idle (0x02 after a move,
-// meaning not confirmed), 0x03 running downwards (closing), 0x43 running
-// upwards (opening).  Bit 0 is "running", bit 6 "opening".  Other values
-// are treated as implausible (README → Response frame).
+// meaning not confirmed), 0x03 running after open/close, 0x43 running to
+// a target position (position command), both in either direction.  Bit 0
+// is "running", bit 6 "to a target"; the zone does not tell the direction.
+// Other values are treated as implausible (README → Response frame).
 constexpr uint8_t ZONE_RUNNING = 0x01;
-constexpr uint8_t ZONE_OPENING = 0x40;
+constexpr uint8_t ZONE_TARGET = 0x40;
 inline bool is_zone(uint8_t z) { return z == 0x00 || z == 0x02 || z == 0x03 || z == 0x43; }
 
+// Raw position byte (as the motor reports and takes it, 0–100) ↔ percent
+// open (0 = closed … 100 = open, ESPHome's convention).  Which end the motor
+// counts from depends on how its end limits were set: `reversed` means raw
+// 0 is open (README → Position conventions).  The mapping is its own
+// inverse.
+inline uint8_t open_percent(uint8_t raw, bool reversed) { return reversed ? uint8_t(100 - raw) : raw; }
+
 struct Status {
-  uint8_t position;  // 0 = closed … 100 = open
+  uint8_t position;  // raw position byte 0–100, see open_percent()
   uint8_t zone;      // see ZONE_*
   uint8_t voltage;   // 0: unknown (damaged reply)
   bool running() const { return (zone & ZONE_RUNNING) != 0; }
-  bool opening() const { return running() && (zone & ZONE_OPENING) != 0; }
   bool operator==(const Status &o) const {
     return position == o.position && zone == o.zone && voltage == o.voltage;
   }
@@ -224,7 +231,7 @@ enum class Command : uint8_t { OTHER, OPEN, CLOSE, STOP, POSITION, STATUS, PROGR
 struct CommandFrame {
   uint32_t key;     // ID 0: broadcast to every motor
   Command command;
-  uint8_t target;   // position for Command::POSITION (0 = closed … 100 = open)
+  uint8_t target;   // raw position for Command::POSITION, see open_percent()
   // The motor acts on this frame.  The motors ignore position frames sent
   // to ID 0 (README → Command frame).
   bool addresses(uint32_t motor) const {

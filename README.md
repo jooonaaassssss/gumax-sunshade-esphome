@@ -97,9 +97,8 @@ are kept out of Git (`esphome/secrets.yaml` is ignored).
 Controller: Waveshare ESP32-S3-RS485-CAN, UART RX GPIO18, TX GPIO17, driver
 enable GPIO21, hostname `awning-motor`.
 
-Motors 1 and 2 are installed and programmed; motors 3–5 are configured but
-not connected yet (their `Online` sensors stay off and they are polled only
-every 5 minutes). Motor 1 was programmed with the RS485 Raw Command frames,
+All five motors are installed, programmed and answer (as of 2026-10-31;
+until 1.4.1 only motors 1 and 2 were connected). Motor 1 was programmed with the RS485 Raw Command frames,
 motor 2 kept its ID through a factory reset; new motors are programmed with
 their `Program` button. A motor that is factory-reset may forget its ID and
 then has to be programmed again.
@@ -368,20 +367,28 @@ described in [How feedback works](#how-feedback-works).
 | 4 | `b3`, unknown: `0x00` while idle, non-zero while running (motor current or speed?) |
 | 5 | Supply voltage in volts, it seems (`0x17`/`0x18` observed); reported as `Awning N Voltage` |
 | 6 | `b5`, unknown: `0x00` while idle, non-zero while running |
-| 7 | Position: 0–100 |
-| 8 | Zone: `0x00`/`0x02` idle (`0x02` after a move, meaning not confirmed), `0x03` running downwards (closing), `0x43` running upwards (opening). Bit 0 = running, bit 6 = opening |
+| 7 | Raw position: 0–100; which end is 0 depends on the motor, see [Position conventions](#position-conventions) |
+| 8 | Zone: `0x00`/`0x02` idle (`0x02` after a move, meaning not confirmed), `0x03` running after an open/close command (or the remote), `0x43` running to a target position (position command). Both in either direction. Bit 0 = running, bit 6 = to a target |
 | 9 | Checksum: XOR of bytes 1–8 |
 
-Example: `D8 02 01 00 00 18 00 00 00 1B` — motor 2, channel 1, position 0 (closed), idle.
+Example: `D8 02 01 00 00 18 00 00 00 1B` — motor 2, channel 1, raw position 0, idle.
 
-Observed on motors 1 and 2:
+Observed on motor 1 on 2026-10-31 (raw 0 = open, see
+[Position conventions](#position-conventions)):
 
 | Frame | State |
 |---|---|
-| `D8 01 01 00 00 18 00 64 02 7E` | Fully open: position 100, zone `0x02` |
-| `D8 01 01 00 1A 17 4D 0F 43 0C` | Opening: position 15, zone `0x43` |
-| `D8 01 01 00 26 18 65 39 03 61` | Closing: position 57, zone `0x03` |
-| `D8 01 01 00 00 18 00 00 02 1A` | Fully closed: position 0, zone `0x02` |
+| `D8 01 01 00 00 18 00 00 02 1A` | Fully open: raw 0, zone `0x02` |
+| `D8 01 01 00 34 18 65 4E 03 04` | Opening (command `0a dd`): raw 78, zone `0x03` |
+| `D8 01 01 00 2A 18 62 08 03 5B` | Closing (command `0a ee`): raw 8, zone `0x03` |
+| `D8 01 01 00 00 18 00 64 02 7E` | Fully closed: raw 100, zone `0x02` |
+| — | Position commands `dd 0a` and `dd 00`: running replies with zone `0x43` in both directions, stopped at raw 10 and 0 |
+
+Up to 1.4.1 the zone was read as the direction (`0x43` opening, `0x03`
+closing). The test above disproves that: opening and closing with `0a dd` /
+`0a ee` both give `0x03`, and `0x43` appears with position commands either
+way. The firmware takes the direction from the command and the position
+change (see [How feedback works](#how-feedback-works)).
 
 The firmware treats other zone values, and `b3`/`b5` that do not match the
 running bit, as implausible: such a reply only counts as a sign of life (see
@@ -390,10 +397,29 @@ the log has `Motor N  reply not readable` after its `RX D8 …` line.
 
 ### Position conventions
 
-Raw position 0 is closed and 100 is open, confirmed on this installation in
-both end positions and while moving. ESPHome uses the
-same direction (`0.0 = closed`, `1.0 = open`), so the covers report
-`raw / 100` and position commands send `position × 100`.
+The motors report and take the position as a raw value 0–100 between their
+end limits. Which end is 0 is not fixed: it depends on how the end limits
+were set (see [End limits](#end-limits)). On this installation it was
+raw 0 = closed on 2026-10-25 (motors 1 and 2) and raw 0 = open on 2026-10-31
+(all five motors, confirmed in both end positions, while moving and with
+position commands). Position commands (`dd XX`) use the same scale as the
+replies.
+
+ESPHome uses `0.0 = closed`, `1.0 = open`. The substitution
+`position_reversed` in [esphome/awning-motor.yaml](esphome/awning-motor.yaml)
+selects the mapping:
+
+| `position_reversed` | Raw 0 | Raw 100 | Cover position | Position command |
+|---|---|---|---|---|
+| `"true"` (this installation) | open | closed | `1 − raw / 100` | `100 − position × 100` |
+| `"false"` | closed | open | `raw / 100` | `position × 100` |
+
+A single motor can differ: add `position_reversed: "false"` (or `"true"`) to
+its `vars` (see [Step 2](#step-2--motor-package-includes)). To check a motor,
+open it fully and look for `Motor N  open=…% (raw 0)` in the log (then
+`"true"`) or `(raw 100)` (then `"false"`). A wrong setting shows open
+awnings as closed and the other way round, and position commands are
+mirrored.
 
 ### End limits
 
@@ -468,6 +494,8 @@ substitutions:
   offline_poll_interval: 5min      # ... while it is offline (e.g. not connected)
   offline_timeout: 90s             # no reply for this long: Online off
 
+  position_reversed: "true"        # raw 0 = open (README → Position conventions)
+
   group1_channel_l: "0x01"         # ChanL byte for group 1 motors
   group1_channel_h: "0x00"
   group2_channel_l: "0x02"         # ChanL byte for group 2 motors
@@ -495,7 +523,9 @@ Each entry generates one `awning_N` cover, the `Awning N Online`,
 `Awning N Program` button (which needs the `programming` package entry).
 The motor is polled as described in [How feedback works](#how-feedback-works);
 only replies that carry its `motor_id` and channel count. In the web interface the covers are sorted
-by `motor_id` (`sorting_weight: ${motor_id}` in `motor.yaml`).
+by `motor_id` (`sorting_weight: ${motor_id}` in `motor.yaml`). An optional
+`position_reversed` in `vars` overrides the substitution for this motor
+(see [Position conventions](#position-conventions)).
 
 ### Step 3 — All-awnings cover
 
@@ -602,8 +632,13 @@ reply. Stop shows idle at once and polls until the final position is in.
 A move by the remote control shows up with the next poll that has the
 running bit (within 15 s), then fast polling follows it. Motors often skip
 replies while running; then the cover jumps to the end position when the
-move is over. While running, the direction comes from the zone (`0x43`
-opening, `0x03` closing).
+move is over. While running, the direction comes from the position change
+between two replies (converted with `position_reversed` first); the zone
+does not tell it (see [Response frame](#response-frame-motor--esp32-10-bytes)).
+Without a change the cover keeps the command's direction. A move by the
+remote control that starts at an end position can only go one way; one that
+starts in between shows idle (but is polled fast) until the position
+changes.
 
 **All Awnings** shows the average position of the online motors and
 opening/closing while they move (opening if at least as many open as
@@ -877,6 +912,7 @@ change `ESPHOME_VERSION` in the workflow together with the version under
 | No reply to any frame | A and B swapped; wrong `uart_flow_control_pin`; long bus runs may need the 120R jumper, but without bias it can make lost bytes worse (see [Waveshare ESP32-S3-RS485-CAN](#4-waveshare-esp32-s3-rs485-can)) |
 | Only `D8 00 …` replies | Motor not programmed, or factory-reset — see [Addressing motors](#addressing-motors-programming-ids-and-channels) |
 | A cover never updates | `motor_id` or channel bytes in the YAML don't match the motor |
+| Open awnings shown as closed (and the other way round), position commands mirrored | `position_reversed` does not match how the motor's end limits were set — see [Position conventions](#position-conventions) |
 | Position always 0, running flag never set | End limits not set — see [End limits](#end-limits) |
 | No status replies while a motor moves | Observed behaviour: motors often don't answer while running; the cover shows the end position when the move is over |
 | `Awning N Online` stays off | No valid reply from that motor: check wiring, `motor_id` and channel bytes, as for a cover that never updates |
@@ -921,7 +957,7 @@ Modified in October 2026. The full record is in the Git history; this is the sum
 - `poll_interval` now takes effect: a package default in `motor.yaml` shadowed the value from the main file.
 - The package templates no longer have defaults for required values, so a missing `motor_id` fails the build instead of silently creating `awning_1`. The broadcast cover no longer takes channel vars the motors ignore.
 
-**Web interface and operation (versions 1.1.0 to 1.4.1)**
+**Web interface and operation (versions 1.1.0 to 1.5.0)**
 
 - ESPHome web interface (`web_server` v3, local, Digest login, web OTA disabled) with the groups Awnings, Service and Diagnostics; see [Web interface](#web-interface).
 - New per-motor online sensors, implemented in `packages/motor.yaml` with a watchdog script (since 1.4.0 in `include/awning_motor.h`); see [Online sensors](#online-sensors).
@@ -954,6 +990,9 @@ Modified in October 2026. The full record is in the Git history; this is the sum
   - Commands for a motor that has not answered since boot (e.g. not connected) no longer show opening/closing; after `All Awnings` open or close, the covers of unconnected motors showed it for 2 minutes. Position frames to ID 0, which the motors ignore, no longer show motion either.
   - ESPHome 2026.10.1; only the generic flash driver is linked (`esp32: framework: advanced: flash_chip: generic`, suggested by the boot log), which saves IRAM.
   - CI: the host test runs with AddressSanitizer and UndefinedBehaviorSanitizer; GitHub Actions updated (checkout v7, setup-python v7, cache v6).
+- Version 1.5.0 (tested on this installation):
+  - All awnings were open but shown as closed: the motors now report raw 0 when open and 100 when closed, the reverse of what was observed on 2026-10-25. New substitution `position_reversed` (default `"true"` here, per motor overridable) maps raw positions to ESPHome's convention for the feedback and the position commands (individual covers, `All Awnings`, position frames of `RS485 Raw Command`); see [Position conventions](#position-conventions). The log shows both values (`Motor N  open=…% (raw …)`).
+  - Direction while running from the command and the position change instead of the zone: zone `0x03` comes with open and close commands in either direction, `0x43` with position commands in either direction. Before, an opening awning (`0x03`) was shown as closing.
 
 **Documentation**
 

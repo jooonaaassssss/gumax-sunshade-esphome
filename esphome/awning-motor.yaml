@@ -34,6 +34,16 @@ substitutions:
   offline_poll_interval: 5min # motor offline, e.g. not connected
   offline_timeout: 90s        # no reply for this long → Online off
 
+  # ── Position direction ────────────────────────────────────────────────────
+  # Which end the motors count their raw position (0–100) from depends on
+  # how their end limits were set (README → Position conventions).
+  #   true:  raw 0 = open, 100 = closed   (this installation, since 2026-10-31)
+  #   false: raw 0 = closed, 100 = open
+  # Check: with an awning fully open, the log shows "Motor N  open=…%
+  # (raw 0)" → true, "(raw 100)" → false.  Per motor: add
+  # position_reversed to that motor's vars below.
+  position_reversed: "true"
+
   # ── Channel bytes ─────────────────────────────────────────────────────────
   # These must match the channel programmed into each motor (see README).
   #
@@ -130,7 +140,7 @@ esphome:
   # Bump the version on every firmware-relevant change (README → Versioning).
   project:
     name: jooonaaassssss.gumax-sunshade-esphome
-    version: "1.4.1"
+    version: "1.5.0"
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -314,7 +324,7 @@ uartex:
 #   Byte 4: Cmd1            ← 0a = motion,  dd = position,  cc = status,
 #                             aa = program ID/channel
 #   Byte 5: Cmd2            ← motion: dd=UP  cc=STOP  ee=DOWN
-#                             position: 00–64 hex (0=closed … 100=open)
+#                             position: 00–64 hex, raw (see position_reversed)
 #                             status: 00,  program: aa
 #
 # Examples:

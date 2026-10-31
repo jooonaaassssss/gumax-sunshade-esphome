@@ -57,8 +57,9 @@ class MotorState {
  public:
   explicit MotorState(const Timing &timing) : timing_(timing) {}
 
-  // A command for this motor was sent.  current: the position shown before
-  // (0–100), used for the direction when no status has been read yet.
+  // A command for this motor was sent.  target: percent open for
+  // Command::POSITION.  current: the position shown before (percent open),
+  // used for the direction when no status has been read yet.
   // Ignored for a motor that has not answered since boot (e.g. not
   // connected): no reply would end the motion it shows.
   void command(uint32_t now, Command cmd, uint8_t target, uint8_t current) {
@@ -91,16 +92,28 @@ class MotorState {
     last_reply_ = now;
   }
 
-  // A decoded status of this motor.
+  // A decoded status of this motor, with the position already converted to
+  // percent open (open_percent()).
   void status(uint32_t now, const Status &s) {
+    const bool had_position = has_position_;
+    const uint8_t previous = position_;
     has_position_ = true;
     position_ = s.position;
     if (s.running()) {
-      // Also a move started by the remote control.  Direction from the
-      // zone: plausible running zones are 0x43 (opening) and 0x03 (closing).
+      // Also a move started by the remote control.  The zone does not tell
+      // the direction (awning_frame.h), the position change does.  Without
+      // one, keep the direction of the command; for a move by the remote
+      // control, an end position allows only one direction.
       active_ = true;
       last_activity_ = now;
-      motion_ = s.opening() ? Motion::OPENING : Motion::CLOSING;
+      if (had_position && s.position > previous)
+        motion_ = Motion::OPENING;
+      else if (had_position && s.position < previous)
+        motion_ = Motion::CLOSING;
+      else if (motion_ == Motion::IDLE && s.position == 0)
+        motion_ = Motion::OPENING;
+      else if (motion_ == Motion::IDLE && s.position == 100)
+        motion_ = Motion::CLOSING;
       return;
     }
     if (active_ && grace_ && now - command_time_ < timing_.start_grace_ms && s.position == start_position_)

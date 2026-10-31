@@ -14,8 +14,9 @@
 #           channel_h: "0x00"
 #
 # All four vars are required.  poll_interval, fast_poll_interval,
-# offline_poll_interval and offline_timeout come from the main file's
-# substitutions, the time source ha_time from the main file as well.
+# offline_poll_interval, offline_timeout and position_reversed come from
+# the main file's substitutions (position_reversed can be overridden per
+# motor in vars), the time source ha_time from the main file as well.
 #
 # Provides:
 #   • cover:          awning_${motor_id}  (uartex platform, position and operation)
@@ -71,7 +72,7 @@ cover:
       return {{(uint8_t)${motor_id}, ${channel_l}, ${channel_h}, 0x0a, 0xcc}};
     command_position: !lambda |-
       uint8_t pct = (uint8_t)(x * 100.0f + 0.5f);
-      return {{(uint8_t)${motor_id}, ${channel_l}, ${channel_h}, 0xdd, pct}, {}};
+      return {{(uint8_t)${motor_id}, ${channel_l}, ${channel_h}, 0xdd, awning::open_percent(pct, ${position_reversed})}, {}};
     # Status query, queued by awning::Motor (no fixed update interval).
     command_update: !lambda |-
       return {{(uint8_t)${motor_id}, ${channel_l}, ${channel_h}, 0xcc, 0x00}};
@@ -131,7 +132,7 @@ esphome:
         timing.fast_poll_ms = awning::duration_ms("${fast_poll_interval}");
         timing.offline_poll_ms = awning::duration_ms("${offline_poll_interval}");
         timing.offline_ms = awning::duration_ms("${offline_timeout}");
-        auto *motor = new awning::Motor(${motor_id}, ${channel_l}, ${channel_h}, timing);
+        auto *motor = new awning::Motor(${motor_id}, ${channel_l}, ${channel_h}, ${position_reversed}, timing);
         motor->set_cover(id(awning_${motor_id}));
         motor->set_voltage_sensor(id(awning_${motor_id}_voltage));
         motor->set_last_seen_sensor(id(awning_${motor_id}_last_seen));

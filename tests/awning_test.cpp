@@ -54,10 +54,16 @@ static void test_read_reply() {
   check_reply("D8 02 01 00 00 18 00 00 00 1B", M2, Seen::STATUS, 0, 0, 24);
   check_reply("D8 01 01 00 00 18 00 64 02 7E D8 01 01 00 00 18 00 64 02 7E", M1, Seen::STATUS, 100, 2, 24);
   check_reply("D8 01 01 00 26 18 65 39 03 61", M1, Seen::STATUS, 57, 3, 24);
-  // While moving (zone 0x43 opening, 0x03 closing); first copy cut off.
+  // While moving (zone 0x43 to a target, 0x03 after open/close); first copy cut off.
   check_reply("D8 01 01 00 19 17 3F 02 D8 01 01 00 1A 17 40 02 43 0C 00 00", M1, Seen::STATUS, 2, 0x43, 23);
   check_reply("D8 01 01 00 1C 17 4F 0F D8 01 01 00 1A 17 4D 0F 43 0C 00 00", M1, Seen::STATUS, 15, 0x43, 23);
   check_reply("D8 01 01 00 11 17 3E 11 D8 01 01 00 0D 17 40 11 03 48 00 00", M1, Seen::STATUS, 17, 3, 23);
+  // Recorded 2026-10-31 (raw 0 = open): closing, then opening, both zone 0x03.
+  check_reply("D8 01 01 00 2A 18 62 08 03 5B 00 00 D8 01 24 18 64 08 03 53 00 00", M1, Seen::STATUS, 8, 3, 24);
+  check_reply("D8 01 01 00 1B 18 40 62 03 22 00 00 D8 01 1B 18 40 62 03 22 00 00", M1, Seen::STATUS, 98, 3, 24);
+  check_reply("D8 01 01 00 34 18 65 4E 03 04 00 00", M1, Seen::STATUS, 78, 3, 24);
+  check_reply("D8 01 01 00 66 18 27 02 D8 01 00 66 18 26 02 03 59 00 00", M1, Seen::REPAIRED, 2, 3, 24);
+  check_reply("D8 01 01 00 00 18 00 0F 02 15 00 00", M1, Seen::STATUS, 15, 2, 24);
   // Junction noise 0xd8 before the second copy.
   check_reply("D8 02 01 00 00 17 00 00 02 16 D8 D8 02 01 00 00 17 00 00 02 16 00 00", M2, Seen::STATUS, 0, 2, 23);
   // While moving, the second copy lost a byte of its address.
@@ -96,8 +102,8 @@ static void test_read_reply() {
 
 // Simulated replies (one or two copies, junction noise, trailing 0x00) with
 // 0–3 lost bytes at random places.  read_reply may give up, but what the
-// firmware uses (position, running, opening, voltage unless unknown) must be
-// right: always with no lost byte, all but a tiny residue otherwise (an XOR
+// firmware uses (position, running and target bits, voltage unless unknown)
+// must be right: always with no lost byte, all but a tiny residue otherwise (an XOR
 // checksum cannot tell every damaged copy from a valid one).  A burst must
 // never give a status for another motor.
 static void test_lost_bytes() {
@@ -134,8 +140,8 @@ static void test_lost_bytes() {
     const Seen seen = read_reply(burst, key, s);
     if (seen == Seen::STATUS || seen == Seen::REPAIRED) {
       decoded[lost]++;
-      const Status want{position, zone, voltage};
-      if (s.position != position || s.running() != want.running() || s.opening() != want.opening() ||
+      const uint8_t used = ZONE_RUNNING | ZONE_TARGET;
+      if (s.position != position || (s.zone & used) != (zone & used) ||
           (s.voltage != 0 && s.voltage != voltage))
         wrong[lost]++;
     }
@@ -211,7 +217,7 @@ static Timing timing() {
 }
 
 static Status st(uint8_t position, bool running) { return {position, uint8_t(running ? 0x03 : 0x02), 23}; }
-static Status opening(uint8_t position) { return {position, 0x43, 23}; }
+static Status to_target(uint8_t position) { return {position, 0x43, 23}; }
 
 static void test_polling() {
   MotorState m(timing());
@@ -252,7 +258,7 @@ static void test_motion() {
   m.reply(3000);
   m.status(3000, st(0, false));
   CHECK(m.motion() == Motion::OPENING && m.moving());
-  m.status(6000, opening(30));
+  m.status(6000, st(30, true));
   CHECK(m.motion() == Motion::OPENING && m.position() == 30);
   // Idle at the end position: done.
   m.status(40000, st(100, false));
@@ -289,27 +295,100 @@ static void test_motion() {
   m.status(213000, st(35, false));
   CHECK(!m.moving() && m.position() == 35);
 
-  // Moved by the remote control: detected by a "running" reply.
-  m.status(300000, opening(45));
+  // Moved by the remote control: detected by a "running" reply, the
+  // direction from the position change (the zone does not tell it).
+  m.status(300000, st(45, true));
   CHECK(m.motion() == Motion::OPENING && m.moving());
-  m.status(303000, opening(60));
+  m.status(303000, st(60, true));
   CHECK(m.motion() == Motion::OPENING);
   m.status(306000, st(50, true));
   CHECK(m.motion() == Motion::CLOSING);
   m.status(309000, st(0, false));
   CHECK(m.motion() == Motion::IDLE && !m.moving());
 
-  // Remote control, first reply already shows the opening bit.
-  m.status(400000, opening(0));
+  // Remote control, first running reply still at the closed end: opening.
+  m.status(400000, st(0, true));
   CHECK(m.motion() == Motion::OPENING && m.moving());
-  m.status(403000, opening(12));
+  m.status(403000, st(12, true));
   CHECK(m.motion() == Motion::OPENING);
   m.status(406000, st(12, false));
   CHECK(m.motion() == Motion::IDLE && !m.moving());
 
-  // Closing by the remote control, first running reply at the old position.
+  // Remote control, first running reply at the old position in between:
+  // direction unknown until the position changes.
   m.status(500000, st(12, true));
+  CHECK(m.motion() == Motion::IDLE && m.moving());
+  CHECK(m.poll_interval(500000) == 3000);
+  m.status(503000, st(8, true));
+  CHECK(m.motion() == Motion::CLOSING);
+  m.status(506000, st(0, false));
+  CHECK(!m.moving());
+
+  // Remote control from the open end: closing.
+  m.status(600000, st(100, false));
+  m.status(615000, st(100, true));
   CHECK(m.motion() == Motion::CLOSING && m.moving());
+  m.status(618000, st(100, false));
+  CHECK(!m.moving());
+
+  // Position command, zone 0x43 in both directions.
+  m.command(700000, Command::POSITION, 90, 100);
+  CHECK(m.motion() == Motion::CLOSING);
+  m.status(701500, to_target(98));
+  CHECK(m.motion() == Motion::CLOSING);
+  m.status(704500, st(90, false));
+  CHECK(!m.moving() && m.position() == 90);
+  m.command(710000, Command::POSITION, 100, 90);
+  CHECK(m.motion() == Motion::OPENING);
+  m.status(711500, to_target(93));
+  CHECK(m.motion() == Motion::OPENING);
+
+  // A running reply at the start position keeps the command's direction;
+  // a position change against it wins.
+  m.status(720000, st(100, false));
+  m.command(730000, Command::CLOSE, 0, 100);
+  m.status(731500, st(100, true));
+  CHECK(m.motion() == Motion::CLOSING);
+  m.status(734500, st(97, true));
+  CHECK(m.motion() == Motion::CLOSING);
+  m.command(740000, Command::OPEN, 0, 97);
+  m.status(741500, st(95, true));  // still running down
+  CHECK(m.motion() == Motion::CLOSING);
+  m.status(744500, st(98, true));
+  CHECK(m.motion() == Motion::OPENING);
+}
+
+// Recorded 2026-10-31 on motor 1 (raw 0 = open): close, then open, every
+// running reply with zone 0x03.
+static void test_reversed_motor() {
+  MotorState m(timing());
+  auto raw = [](uint8_t position, bool running) { return st(open_percent(position, true), running); };
+  m.reply(0);
+  m.status(0, raw(0, false));
+  CHECK(m.position() == 100);
+  m.command(1000, Command::CLOSE, 0, 100);
+  CHECK(m.motion() == Motion::CLOSING);
+  for (const uint8_t p : {2, 8, 22, 29, 36, 50, 64, 100}) {
+    m.status(2000 + p * 100, raw(p, true));
+    CHECK(m.motion() == Motion::CLOSING);
+  }
+  m.status(30000, raw(100, false));
+  CHECK(!m.moving() && m.position() == 0);
+  m.command(40000, Command::OPEN, 0, 0);
+  CHECK(m.motion() == Motion::OPENING);
+  for (const uint8_t p : {98, 78, 71, 64, 50, 37, 24, 12, 6, 2}) {
+    m.status(41000 + (100 - p) * 100, raw(p, true));
+    CHECK(m.motion() == Motion::OPENING);
+  }
+  m.status(60000, raw(0, false));
+  CHECK(!m.moving() && m.position() == 100);
+}
+
+static void test_open_percent() {
+  CHECK(open_percent(0, false) == 0 && open_percent(100, false) == 100 && open_percent(37, false) == 37);
+  CHECK(open_percent(0, true) == 100 && open_percent(100, true) == 0 && open_percent(37, true) == 63);
+  for (int p = 0; p <= 100; p++)
+    CHECK(open_percent(open_percent(uint8_t(p), true), true) == p);
 }
 
 // Online is latched off by tick(), so millis() wrapping around after 49.7
@@ -353,6 +432,8 @@ int main() {
   test_commands();
   test_polling();
   test_motion();
+  test_reversed_motor();
+  test_open_percent();
   test_unknown_motor();
   test_online_wrap();
   std::printf("%d failure(s)\n", failures);
