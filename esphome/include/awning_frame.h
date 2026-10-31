@@ -51,14 +51,21 @@ inline uint8_t xor_of(const uint8_t *data, size_t len) {
 // frames shifted by a lost byte.
 inline bool is_voltage(uint8_t v) { return v >= 20 && v <= 30; }
 
-// Zone byte values observed: 0x00 and 0x02 idle (0x02 after a move,
-// meaning not confirmed), 0x03 running after open/close, 0x43 running to
-// a target position (position command), both in either direction.  Bit 0
-// is "running", bit 6 "to a target"; the zone does not tell the direction.
-// Other values are treated as implausible (README → Response frame).
+// Zone byte: bit 0 running, bit 1 position known ("referenced"), bit 6
+// running to / stopped at a target position (position command).  Observed:
+// 0x02 idle, 0x03 running after open/close, 0x43 running to a target (both
+// in either direction: the zone does not tell the direction); after a
+// power loss the motor has lost its position and reports 0x00 idle, 0x01
+// running, 0x41 running to a target, 0x40 stopped at a target, always with
+// position 0, until it reaches its closed end limit (this installation).
+// Other values (0x42 was never seen) are treated as implausible (README →
+// Response frame).
 constexpr uint8_t ZONE_RUNNING = 0x01;
+constexpr uint8_t ZONE_REFERENCED = 0x02;
 constexpr uint8_t ZONE_TARGET = 0x40;
-inline bool is_zone(uint8_t z) { return z == 0x00 || z == 0x02 || z == 0x03 || z == 0x43; }
+inline bool is_zone(uint8_t z) {
+  return z == 0x00 || z == 0x01 || z == 0x02 || z == 0x03 || z == 0x40 || z == 0x41 || z == 0x43;
+}
 
 // Raw position byte (as the motor reports and takes it, 0–100) ↔ percent
 // open (0 = closed … 100 = open, ESPHome's convention).  Which end the motor
@@ -72,6 +79,8 @@ struct Status {
   uint8_t zone;      // see ZONE_*
   uint8_t voltage;   // 0: unknown (damaged reply)
   bool running() const { return (zone & ZONE_RUNNING) != 0; }
+  // The position byte is valid; without this bit it is always 0.
+  bool referenced() const { return (zone & ZONE_REFERENCED) != 0; }
   bool operator==(const Status &o) const {
     return position == o.position && zone == o.zone && voltage == o.voltage;
   }
@@ -85,6 +94,8 @@ struct Status {
 inline bool plausible(const uint8_t *r) {
   if (!is_voltage(r[4]) || r[6] > 100 || !is_zone(r[7]))
     return false;
+  if ((r[7] & ZONE_REFERENCED) == 0 && r[6] != 0)
+    return false;  // position lost: always reported as 0
   const bool running = (r[7] & ZONE_RUNNING) != 0;
   return running ? (r[3] != 0 && r[5] != 0) : (r[3] == 0 && r[5] == 0);
 }
@@ -176,7 +187,11 @@ enum class Seen : uint8_t {
 //  - if the burst starts with its address: the end of the burst
 //    (tail_block),
 // and used only if all of these readings agree.  A single damaged copy
-// (decode_damaged) is the last resort.
+// (decode_damaged) is the last resort.  If the burst holds an intact block
+// of another motor after a 0xd8, only intact blocks with this motor's
+// address after a 0xd8 count: the start of the burst may be that motor's
+// damaged first copy, and addresses with the same XOR (e.g. 01 01 00 and
+// 00 00 00) give the same checksum at the end of the burst.
 inline Seen read_reply(const std::vector<uint8_t> &burst, uint32_t key, Status &out) {
   const bool header = burst.size() >= 4 && burst[0] == RX_HEADER && key_at(burst, 1) == key;
   bool found = false, contradiction = false;
@@ -191,18 +206,22 @@ inline Seen read_reply(const std::vector<uint8_t> &burst, uint32_t key, Status &
     }
   };
   Status status;
+  bool other = false;
+  for (size_t offset = 1; offset + 9 <= burst.size() && !other; offset++)
+    other = burst[offset - 1] == RX_HEADER && key_at(burst, offset) != key && block_at(burst, offset, status);
+  const bool own = header && !other;
   for (size_t offset = 1; offset + 9 <= burst.size(); offset++) {
-    if (key_at(burst, offset) == key && (burst[offset - 1] == RX_HEADER || header) &&
+    if (key_at(burst, offset) == key && (burst[offset - 1] == RX_HEADER || own) &&
         block_at(burst, offset, status))
       add(status, Seen::STATUS);
   }
-  if (header && tail_block(burst, key, status))
+  if (own && tail_block(burst, key, status))
     add(status, Seen::REPAIRED);
   if (contradiction)
     return Seen::YES;
   if (found)
     return seen;
-  if (header && decode_damaged(burst, out))
+  if (own && decode_damaged(burst, out))
     return Seen::REPAIRED;
   return seen;
 }

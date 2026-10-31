@@ -64,6 +64,16 @@ static void test_read_reply() {
   check_reply("D8 01 01 00 34 18 65 4E 03 04 00 00", M1, Seen::STATUS, 78, 3, 24);
   check_reply("D8 01 01 00 66 18 27 02 D8 01 00 66 18 26 02 03 59 00 00", M1, Seen::REPAIRED, 2, 3, 24);
   check_reply("D8 01 01 00 00 18 00 0F 02 15 00 00", M1, Seen::STATUS, 15, 2, 24);
+  // Recorded 2026-10-31 after a power loss: position lost (zone bit 1
+  // clear, position 0) while idle, running, running to a target, stopped at
+  // a target.
+  check_reply("D8 01 01 00 00 18 00 00 00 18 00 00", M1, Seen::STATUS, 0, 0, 24);
+  check_reply("D8 01 01 00 1A 18 41 00 01 42 00 00", M1, Seen::STATUS, 0, 1, 24);
+  check_reply("D8 02 01 00 29 18 65 00 41 16 00 00 D8 02 00 2A 18 65 00 41 15 00 00", M2, Seen::STATUS, 0, 0x41,
+              24);
+  check_reply("D8 02 01 00 00 18 00 00 40 5B 00 00", M2, Seen::STATUS, 0, 0x40, 24);
+  // Position lost, but a position byte: implausible.
+  check_reply("D8 01 01 00 00 18 00 0F 00 17", M1, Seen::YES);
   // Junction noise 0xd8 before the second copy.
   check_reply("D8 02 01 00 00 17 00 00 02 16 D8 D8 02 01 00 00 17 00 00 02 16 00 00", M2, Seen::STATUS, 0, 2, 23);
   // While moving, the second copy lost a byte of its address.
@@ -102,20 +112,30 @@ static void test_read_reply() {
 
 // Simulated replies (one or two copies, junction noise, trailing 0x00) with
 // 0–3 lost bytes at random places.  read_reply may give up, but what the
-// firmware uses (position, running and target bits, voltage unless unknown)
-// must be right: always with no lost byte, all but a tiny residue otherwise (an XOR
+// firmware uses (position, zone, voltage unless unknown) must be right:
+// always with no lost byte, all but a tiny residue otherwise (an XOR
 // checksum cannot tell every damaged copy from a valid one).  A burst must
 // never give a status for another motor.
-static void test_lost_bytes() {
-  std::mt19937 rng(1);
-  const uint32_t keys[] = {M1, M2, make_key(5, 2, 0), make_key(0, 0, 0)};
+struct LostBytes {
   long total[4] = {}, decoded[4] = {}, wrong[4] = {}, foreign = 0;
-  for (int i = 0; i < 400000; i++) {
+};
+
+// position_lost: replies of a motor that lost its position (zone 0x00,
+// 0x01, 0x40, 0x41, position 0), otherwise of one that knows it (0x02,
+// 0x03, 0x43).
+static LostBytes simulate_lost_bytes(bool position_lost, int count, unsigned seed) {
+  std::mt19937 rng(seed);
+  const uint32_t keys[] = {M1, M2, make_key(5, 2, 0), make_key(0, 0, 0)};
+  LostBytes r;
+  for (int i = 0; i < count; i++) {
     const size_t k = rng() % 4;
     const uint32_t key = keys[k], other = keys[(k + 1 + rng() % 3) % 4];
     const bool moving = rng() % 2;
-    const uint8_t position = rng() % 101;
-    const uint8_t zone = moving ? (rng() % 2 ? 0x43 : 0x03) : (rng() % 2 ? 0x02 : 0x00);
+    const bool target = rng() % 2;
+    uint8_t zone = moving ? (target ? 0x43 : 0x03) : 0x02;
+    if (position_lost)
+      zone = moving ? (target ? 0x41 : 0x01) : (target ? 0x40 : 0x00);
+    const uint8_t position = position_lost ? 0 : rng() % 101;
     const uint8_t voltage = 0x17 + rng() % 2;
     const uint8_t b3 = moving ? 1 + rng() % 0x3f : 0, b5 = moving ? 1 + rng() % 0x7f : 0;
     std::vector<uint8_t> frame{RX_HEADER, key_id(key), key_chan_l(key), key_chan_h(key), b3, voltage, b5,
@@ -135,28 +155,41 @@ static void test_lost_bytes() {
     const int lost = rng() % 4;
     for (int n = 0; n < lost; n++)
       burst.erase(burst.begin() + rng() % burst.size());
-    total[lost]++;
+    r.total[lost]++;
     Status s{};
     const Seen seen = read_reply(burst, key, s);
     if (seen == Seen::STATUS || seen == Seen::REPAIRED) {
-      decoded[lost]++;
-      const uint8_t used = ZONE_RUNNING | ZONE_TARGET;
-      if (s.position != position || (s.zone & used) != (zone & used) ||
-          (s.voltage != 0 && s.voltage != voltage))
-        wrong[lost]++;
+      r.decoded[lost]++;
+      if (s.position != position || s.zone != zone || (s.voltage != 0 && s.voltage != voltage))
+        r.wrong[lost]++;
     }
     const Seen seen_other = read_reply(burst, other, s);
     if (seen_other == Seen::STATUS || seen_other == Seen::REPAIRED)
-      foreign++;
+      r.foreign++;
   }
+  std::printf("%s:\n", position_lost ? "position lost" : "position known");
   for (int lost = 0; lost < 4; lost++)
-    std::printf("lost %d byte(s): %ld replies, %.1f %% decoded, %ld wrong\n", lost, total[lost],
-                100.0 * decoded[lost] / total[lost], wrong[lost]);
-  std::printf("status for another motor: %ld\n", foreign);
-  CHECK(decoded[0] == total[0] && wrong[0] == 0);
-  CHECK(wrong[1] * 50000 <= total[1]);                         // at most 0.002 %
-  CHECK((wrong[2] + wrong[3]) * 5000 <= total[2] + total[3]);  // at most 0.02 %
-  CHECK(foreign == 0);
+    std::printf("  lost %d byte(s): %ld replies, %.1f %% decoded, %ld wrong\n", lost, r.total[lost],
+                100.0 * r.decoded[lost] / r.total[lost], r.wrong[lost]);
+  std::printf("  status for another motor: %ld\n", r.foreign);
+  return r;
+}
+
+static void test_lost_bytes() {
+  const LostBytes known = simulate_lost_bytes(false, 400000, 1);
+  CHECK(known.decoded[0] == known.total[0] && known.wrong[0] == 0);
+  CHECK(known.wrong[1] * 50000 <= known.total[1]);                                     // at most 0.002 %
+  CHECK((known.wrong[2] + known.wrong[3]) * 5000 <= known.total[2] + known.total[3]);  // at most 0.02 %
+  CHECK(known.foreign == 0);
+  // Only after a power loss, until the motor has closed once.  Errors are
+  // running replies that lost their position byte (0x00), so that the
+  // checksum reads as a running zone and a trailing 0x00 as the checksum;
+  // the next poll corrects them.
+  const LostBytes lost = simulate_lost_bytes(true, 200000, 2);
+  CHECK(lost.decoded[0] == lost.total[0] && lost.wrong[0] == 0);
+  CHECK(lost.wrong[1] * 2000 <= lost.total[1]);                                   // at most 0.05 %
+  CHECK((lost.wrong[2] + lost.wrong[3]) * 1000 <= lost.total[2] + lost.total[3]);  // at most 0.1 %
+  CHECK(lost.foreign == 0);
 }
 
 static void test_reply_keys() {
@@ -361,27 +394,250 @@ static void test_motion() {
 // Recorded 2026-10-31 on motor 1 (raw 0 = open): close, then open, every
 // running reply with zone 0x03.
 static void test_reversed_motor() {
-  MotorState m(timing());
-  auto raw = [](uint8_t position, bool running) { return st(open_percent(position, true), running); };
+  MotorState m(timing(), true);
   m.reply(0);
-  m.status(0, raw(0, false));
+  m.status(0, st(0, false));
   CHECK(m.position() == 100);
   m.command(1000, Command::CLOSE, 0, 100);
   CHECK(m.motion() == Motion::CLOSING);
   for (const uint8_t p : {2, 8, 22, 29, 36, 50, 64, 100}) {
-    m.status(2000 + p * 100, raw(p, true));
+    m.status(2000 + p * 300, st(p, true));
     CHECK(m.motion() == Motion::CLOSING);
   }
-  m.status(30000, raw(100, false));
-  CHECK(!m.moving() && m.position() == 0);
-  m.command(40000, Command::OPEN, 0, 0);
+  m.status(40000, st(100, false));
+  CHECK(!m.moving() && m.position() == 0 && m.reversed());
+  m.command(50000, Command::OPEN, 0, 0);
   CHECK(m.motion() == Motion::OPENING);
   for (const uint8_t p : {98, 78, 71, 64, 50, 37, 24, 12, 6, 2}) {
-    m.status(41000 + (100 - p) * 100, raw(p, true));
+    m.status(51000 + (100 - p) * 300, st(p, true));
     CHECK(m.motion() == Motion::OPENING);
   }
-  m.status(60000, raw(0, false));
-  CHECK(!m.moving() && m.position() == 100);
+  m.status(90000, st(0, false));
+  CHECK(!m.moving() && m.position() == 100 && m.reversed());
+  // Position commands carry the raw position.
+  CHECK(m.raw_position(90) == 10);
+  m.command(100000, Command::POSITION, 10, 100);
+  CHECK(m.motion() == Motion::CLOSING);
+}
+
+// The counting direction follows the motor: two readings in a row against
+// it during an open or close (after the start grace) turn it around.
+static void test_learn_direction() {
+  {
+    // Believed raw 0 = closed, but the motor counts the other way.
+    MotorState m(timing(), false);
+    m.reply(0);
+    m.status(0, st(100, false));  // physically closed, shown open
+    CHECK(m.position() == 100);
+    m.command(1000, Command::OPEN, 0, 100);
+    m.status(2500, st(98, true));  // within the start grace: not counted
+    CHECK(!m.reversed());
+    m.status(7000, st(90, true));  // against: 1
+    CHECK(!m.reversed());
+    m.status(10000, st(80, true));  // against: 2
+    CHECK(m.reversed() && m.position() == 20 && m.motion() == Motion::OPENING);
+    m.status(13000, st(60, true));
+    CHECK(m.position() == 40 && m.motion() == Motion::OPENING);
+    m.status(30000, st(0, false));
+    CHECK(m.position() == 100 && !m.moving() && m.reversed());
+  }
+  {
+    // A single reading against it (e.g. a damaged reply) changes nothing.
+    MotorState m(timing(), false);
+    m.reply(0);
+    m.status(0, st(0, false));
+    m.command(1000, Command::OPEN, 0, 0);
+    m.status(7000, st(20, true));
+    m.status(10000, st(15, true));  // against: 1
+    m.status(13000, st(40, true));  // with: reset
+    m.status(16000, st(35, true));  // against: 1
+    m.status(19000, st(60, true));
+    CHECK(!m.reversed() && m.position() == 60);
+  }
+  {
+    // Position commands and moves by the remote control do not count.
+    MotorState m(timing(), false);
+    m.reply(0);
+    m.status(0, st(50, false));
+    m.command(1000, Command::POSITION, 20, 50);
+    m.status(7000, st(40, true));
+    m.status(10000, st(30, true));
+    m.status(13000, st(20, false));
+    m.status(30000, st(25, true));
+    m.status(33000, st(30, true));
+    m.status(36000, st(35, true));
+    CHECK(!m.reversed());
+  }
+}
+
+// Recorded 2026-10-31: after a power loss the motors report zone 0x00 /
+// 0x01 / 0x40 / 0x41 with position 0.  They count from 0 at the first end
+// limit they reach and report their position again (raw 100) at the second.
+static Status lost(bool running) { return {0, uint8_t(running ? 0x01 : 0x00), 24}; }
+
+static void test_power_loss() {
+  using C = MotorState::Calibration;
+  uint8_t target = 0;
+  {
+    // Like motor 1: the open end was reached first, so the close finds
+    // the position, raw 100 = closed.
+    MotorState m(timing(), false);
+    // First reply after boot: position lost.  The position is not taken
+    // (the cover keeps the restored one).
+    m.reply(0);
+    m.status(0, lost(false));
+    CHECK(m.position_lost() && !m.has_position());
+    CHECK(m.calibration(0, target) == C::NONE);
+
+    CHECK(m.begin_calibration(1000, 50));
+    CHECK(m.calibrating());
+    CHECK(m.calibration(1500, target) == C::NONE);  // close still queued
+    m.command(2000, Command::CLOSE, 0, 70, true);   // the calibration close
+    CHECK(m.calibrating() && m.motion() == Motion::CLOSING && m.moving());
+    m.status(3500, lost(false));  // not started yet
+    CHECK(m.moving() && m.calibration(3500, target) == C::NONE);
+    m.status(6500, lost(true));
+    CHECK(m.motion() == Motion::CLOSING && m.calibration(6500, target) == C::NONE);
+    m.status(9500, {0, 0x41, 24});  // still lost, direction kept
+    CHECK(m.motion() == Motion::CLOSING);
+    m.status(40000, st(100, false));  // found: raw 100 = closed
+    CHECK(!m.position_lost() && m.reversed() && m.position() == 0 && !m.moving());
+    CHECK(m.calibration(40000, target) == C::SEND_TARGET && target == 50);
+    CHECK(!m.calibrating() && m.calibration(40100, target) == C::NONE);
+    // The target goes out as a normal position command.
+    CHECK(!m.begin_calibration(41000, 50));
+    CHECK(m.raw_position(50) == 50);
+    m.command(41000, Command::POSITION, 50, 0, true);
+    CHECK(m.motion() == Motion::OPENING);
+  }
+  {
+    // Like motors 3–5: the close reaches the first end limit, an open the
+    // second, raw 100 = open.
+    MotorState m(timing(), true);
+    m.reply(0);
+    m.status(0, lost(false));
+    CHECK(m.begin_calibration(1000, 30));
+    m.command(2000, Command::CLOSE, 0, 70, true);
+    m.status(6500, lost(true));
+    m.status(30000, lost(false));  // closed end, still lost
+    CHECK(!m.moving() && m.position_lost() && m.has_position() && m.position() == 0);
+    CHECK(m.calibration(30000, target) == C::SEND_OPEN);
+    CHECK(m.calibrating() && m.calibration(31000, target) == C::NONE);  // open still queued
+    m.command(31500, Command::OPEN, 0, 70, true);                       // the calibration open
+    CHECK(m.calibrating() && m.motion() == Motion::OPENING);
+    m.status(35000, lost(true));
+    m.status(70000, st(100, false));  // found: raw 100 = open
+    CHECK(!m.position_lost() && !m.reversed() && m.position() == 100);
+    CHECK(m.calibration(70000, target) == C::SEND_TARGET && target == 30);
+    CHECK(m.raw_position(30) == 30);
+  }
+}
+
+static void test_power_loss_other_commands() {
+  using C = MotorState::Calibration;
+  uint8_t target = 0;
+  {
+    // Another command (open, stop, a broadcast close, a position) cancels it.
+    MotorState m(timing());
+    m.reply(0);
+    m.status(0, lost(false));
+    CHECK(m.begin_calibration(1000, 30));
+    m.command(2000, Command::CLOSE, 0, 70, true);
+    m.command(4000, Command::OPEN, 0, 70, false);
+    CHECK(!m.calibrating() && m.motion() == Motion::OPENING);
+    CHECK(m.begin_calibration(5000, 30));
+    m.command(5500, Command::CLOSE, 0, 70, false);  // broadcast before our close
+    CHECK(!m.calibrating());
+    CHECK(m.begin_calibration(6000, 30));
+    m.command(6500, Command::CLOSE, 0, 70, true);
+    m.status(9000, lost(true));
+    m.status(30000, lost(false));
+    CHECK(m.calibration(30000, target) == C::SEND_OPEN);
+    m.command(30500, Command::STOP, 0, 70, true);  // instead of our open
+    CHECK(!m.calibrating());
+  }
+  {
+    // A command is never sent: given up after poll_timeout_ms.
+    MotorState m(timing());
+    m.reply(0);
+    m.status(0, lost(false));
+    CHECK(m.begin_calibration(1000, 30));
+    CHECK(m.calibration(30999, target) == C::NONE);
+    CHECK(m.calibration(31000, target) == C::FAILED && target == 30 && !m.calibrating());
+  }
+  {
+    // Both moves end without the position (e.g. stopped by the remote
+    // control): failed.
+    MotorState m(timing());
+    m.reply(0);
+    m.status(0, lost(false));
+    CHECK(m.begin_calibration(1000, 30));
+    m.command(2000, Command::CLOSE, 0, 70, true);
+    m.status(5000, lost(true));
+    m.status(12000, lost(false));
+    CHECK(m.calibration(12000, target) == C::SEND_OPEN);
+    m.command(13000, Command::OPEN, 0, 70, true);
+    m.status(16000, lost(true));
+    m.command(18000, Command::OTHER, 0, 70, true);  // e.g. a program frame: no effect
+    CHECK(m.calibrating());
+    m.status(25000, lost(false));
+    CHECK(m.calibration(25000, target) == C::FAILED && !m.calibrating());
+  }
+  {
+    // A full open/close of a motor without position ends at an end limit;
+    // stopped by us or moved by the remote control: position unknown.
+    MotorState m(timing());
+    m.reply(0);
+    m.status(0, lost(false));
+    m.command(1000, Command::OPEN, 0, 70);
+    CHECK(m.motion() == Motion::OPENING);
+    m.status(4000, lost(true));
+    m.status(20000, lost(false));
+    CHECK(!m.moving() && m.has_position() && m.position() == 100 && m.position_lost());
+    m.command(21000, Command::CLOSE, 0, 100);
+    m.status(24000, lost(true));
+    m.status(50000, lost(false));
+    CHECK(!m.moving() && m.position() == 0 && m.position_lost());
+
+    MotorState s(timing());
+    s.reply(0);
+    s.status(0, lost(false));
+    s.command(1000, Command::OPEN, 0, 70);
+    s.status(4000, lost(true));
+    s.command(5000, Command::STOP, 0, 70);
+    s.status(7000, lost(false));
+    CHECK(!s.moving() && !s.has_position());
+
+    MotorState r(timing());
+    r.reply(0);
+    r.status(0, lost(false));
+    r.status(1000, lost(true));  // remote control
+    CHECK(r.moving() && r.motion() == Motion::IDLE);
+    r.status(20000, lost(false));
+    CHECK(!r.moving() && !r.has_position());
+  }
+  {
+    // Open/close of a motor without position always show the motion, even
+    // if the shown position is already at that end.
+    MotorState m(timing());
+    m.reply(0);
+    m.status(0, lost(false));
+    m.command(1000, Command::OPEN, 0, 100);
+    CHECK(m.motion() == Motion::OPENING);
+    m.command(2000, Command::CLOSE, 0, 0);
+    CHECK(m.motion() == Motion::CLOSING);
+  }
+  {
+    // A motor with a known position never calibrates, and the first reply
+    // after a reboot of the ESP does not change the counting direction.
+    MotorState m(timing(), true);
+    CHECK(!m.begin_calibration(0, 30));  // no reply yet
+    m.command(0, Command::OPEN, 0, 100);
+    m.reply(1000);
+    m.status(1000, st(100, false));
+    CHECK(m.reversed() && m.position() == 0);
+    CHECK(!m.begin_calibration(1000, 30));
+  }
 }
 
 static void test_open_percent() {
@@ -433,6 +689,9 @@ int main() {
   test_polling();
   test_motion();
   test_reversed_motor();
+  test_learn_direction();
+  test_power_loss();
+  test_power_loss_other_commands();
   test_open_percent();
   test_unknown_motor();
   test_online_wrap();

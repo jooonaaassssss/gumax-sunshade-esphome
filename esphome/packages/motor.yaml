@@ -17,6 +17,9 @@
 # offline_poll_interval, offline_timeout and position_reversed come from
 # the main file's substitutions (position_reversed can be overridden per
 # motor in vars), the time source ha_time from the main file as well.
+# position_reversed is only the counting direction until the motor has
+# shown its own (README → Position conventions); the learned one is kept in
+# awning_${motor_id}_reversed across reboots.
 #
 # Provides:
 #   • cover:          awning_${motor_id}  (uartex platform, position and operation)
@@ -70,9 +73,15 @@ cover:
       return {{(uint8_t)${motor_id}, ${channel_l}, ${channel_h}, 0x0a, 0xee}};
     command_stop: !lambda |-
       return {{(uint8_t)${motor_id}, ${channel_l}, ${channel_h}, 0x0a, 0xcc}};
+    # A motor that lost its position (power loss) closes first and gets the
+    # position once it has found it (awning::Motor::begin_calibration).
     command_position: !lambda |-
+      auto *motor = awning::find_motor(awning::make_key(${motor_id}, ${channel_l}, ${channel_h}));
+      if (motor != nullptr && motor->begin_calibration(x))
+        return {{(uint8_t)${motor_id}, ${channel_l}, ${channel_h}, 0x0a, 0xee}, {}};
       uint8_t pct = (uint8_t)(x * 100.0f + 0.5f);
-      return {{(uint8_t)${motor_id}, ${channel_l}, ${channel_h}, 0xdd, awning::open_percent(pct, ${position_reversed})}, {}};
+      uint8_t raw = motor != nullptr ? motor->raw_position(pct) : awning::open_percent(pct, ${position_reversed});
+      return {{(uint8_t)${motor_id}, ${channel_l}, ${channel_h}, 0xdd, raw}, {}};
     # Status query, queued by awning::Motor (no fixed update interval).
     command_update: !lambda |-
       return {{(uint8_t)${motor_id}, ${channel_l}, ${channel_h}, 0xcc, 0x00}};
@@ -120,6 +129,14 @@ text_sensor:
       sorting_group_id: sg_diagnostics
       sorting_weight: ${motor_id}.2
 
+# Counting direction of this motor (raw 0 = open), learned from its moves
+# and kept across reboots; position_reversed until then.
+globals:
+  - id: awning_${motor_id}_reversed
+    type: bool
+    restore_value: true
+    initial_value: ${position_reversed}
+
 esphome:
   on_boot:
     - lambda: |-
@@ -132,7 +149,7 @@ esphome:
         timing.fast_poll_ms = awning::duration_ms("${fast_poll_interval}");
         timing.offline_poll_ms = awning::duration_ms("${offline_poll_interval}");
         timing.offline_ms = awning::duration_ms("${offline_timeout}");
-        auto *motor = new awning::Motor(${motor_id}, ${channel_l}, ${channel_h}, ${position_reversed}, timing);
+        auto *motor = new awning::Motor(${motor_id}, ${channel_l}, ${channel_h}, &id(awning_${motor_id}_reversed), timing);
         motor->set_cover(id(awning_${motor_id}));
         motor->set_voltage_sensor(id(awning_${motor_id}_voltage));
         motor->set_last_seen_sensor(id(awning_${motor_id}_last_seen));

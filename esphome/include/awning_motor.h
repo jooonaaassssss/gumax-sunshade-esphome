@@ -54,9 +54,11 @@ inline esphome::cover::CoverOperation to_operation(Motion motion) {
 
 class Motor {
  public:
-  // reversed: the motor reports raw position 0 when open (open_percent()).
-  Motor(uint8_t id, uint8_t chan_l, uint8_t chan_h, bool reversed, const Timing &timing)
-      : id_(id), key_(make_key(id, chan_l, chan_h)), reversed_(reversed), state_(timing) {
+  // reversed: the counting direction (raw 0 = open, see MotorState), kept
+  // across reboots by the caller (a restore_value global); updated when
+  // MotorState learns it.
+  Motor(uint8_t id, uint8_t chan_l, uint8_t chan_h, bool *reversed, const Timing &timing)
+      : id_(id), key_(make_key(id, chan_l, chan_h)), reversed_(reversed), state_(timing, *reversed) {
     motors().push_back(this);
   }
 
@@ -76,9 +78,22 @@ class Motor {
   // Answered at least once since boot (connected).
   bool seen() const { return this->state_.seen(); }
   bool has_position() const { return this->state_.has_position(); }
+  bool position_lost() const { return this->state_.position_lost(); }
   Motion motion() const { return this->state_.motion(); }
   // Percent open (0–100) → raw position byte for a position command.
-  uint8_t raw_position(uint8_t percent_open) const { return open_percent(percent_open, this->reversed_); }
+  uint8_t raw_position(uint8_t percent_open) const { return this->state_.raw_position(percent_open); }
+
+  // From the cover's command_position: true if the motor has lost its
+  // position; the cover then sends a close instead, and an open and the
+  // target follow as needed (MotorState::begin_calibration).
+  bool begin_calibration(float position) {
+    const uint8_t target = uint8_t(position * 100.0f + 0.5f);
+    if (!this->state_.begin_calibration(esphome::millis(), target))
+      return false;
+    ESP_LOGW("awning", "Motor %u  position unknown (power loss?): closing to find it, then %u%%", this->id_,
+             target);
+    return true;
+  }
 
   // One burst of the raw receive tap.
   void on_burst(const std::vector<uint8_t> &burst) {
@@ -90,11 +105,21 @@ class Motor {
     const bool was_online = this->state_.online(now);
     this->state_.reply(now);
     if (seen == Seen::STATUS || seen == Seen::REPAIRED) {
-      const uint8_t raw = status.position;
-      status.position = open_percent(raw, this->reversed_);
-      ESP_LOGD("awning", "Motor %u  open=%u%% (raw %u)  running=%u  zone=0x%02X%s", this->id_, status.position, raw,
-               status.running(), status.zone, seen == Seen::REPAIRED ? "  (damaged reply)" : "");
+      const bool was_lost = this->state_.position_lost();
       this->state_.status(now, status);
+      if (status.referenced())
+        ESP_LOGD("awning", "Motor %u  open=%u%% (raw %u)  running=%u  zone=0x%02X%s", this->id_,
+                 open_percent(status.position, this->state_.reversed()), status.position, status.running(), status.zone,
+                 seen == Seen::REPAIRED ? "  (damaged reply)" : "");
+      else
+        ESP_LOGD("awning", "Motor %u  position unknown  running=%u  zone=0x%02X%s", this->id_, status.running(),
+                 status.zone, seen == Seen::REPAIRED ? "  (damaged reply)" : "");
+      if (!was_lost && this->state_.position_lost())
+        ESP_LOGW("awning", "Motor %u  has lost its position (power loss?); found again after both end limits",
+                 this->id_);
+      else if (was_lost && !this->state_.position_lost())
+        ESP_LOGI("awning", "Motor %u  position found again", this->id_);
+      this->sync_direction_();
       if (this->voltage_ != nullptr && status.voltage != 0 && this->voltage_->state != status.voltage)
         this->voltage_->publish_state(status.voltage);
       this->publish_cover_();
@@ -116,7 +141,7 @@ class Motor {
       return;
     }
     const uint8_t current = uint8_t(this->cover_->position * 100.0f + 0.5f);
-    this->state_.command(now, f.command, open_percent(f.target, this->reversed_), current);
+    this->state_.command(now, f.command, f.target, current, f.key == this->key_);
     this->publish_cover_();
   }
 
@@ -132,9 +157,34 @@ class Motor {
       this->poller_->update();  // queues the cover's command_update
       this->state_.poll_queued(now);
     }
+    uint8_t target;
+    switch (this->state_.calibration(now, target)) {
+      case MotorState::Calibration::SEND_OPEN:
+        ESP_LOGW("awning", "Motor %u  closed end reached first, opening fully to find the position", this->id_);
+        this->cover_->make_call().set_command_open().perform();
+        break;
+      case MotorState::Calibration::SEND_TARGET:
+        ESP_LOGI("awning", "Motor %u  position found, moving to %u%%", this->id_, target);
+        this->cover_->make_call().set_position(target / 100.0f).perform();
+        break;
+      case MotorState::Calibration::FAILED:
+        ESP_LOGW("awning", "Motor %u  position still unknown, %u%% not sent", this->id_, target);
+        break;
+      default:
+        break;
+    }
   }
 
  protected:
+  // Keeps the learned counting direction across reboots.
+  void sync_direction_() {
+    if (*this->reversed_ == this->state_.reversed())
+      return;
+    *this->reversed_ = this->state_.reversed();
+    ESP_LOGW("awning", "Motor %u  counts the other way now: raw 0 = %s", this->id_,
+             this->state_.reversed() ? "open" : "closed");
+  }
+
   void publish_cover_() {
     const float position = this->state_.has_position() ? this->state_.position() / 100.0f : this->cover_->position;
     const auto operation = to_operation(this->state_.motion());
@@ -167,7 +217,7 @@ class Motor {
 
   uint8_t id_;
   uint32_t key_;
-  bool reversed_;
+  bool *reversed_;
   MotorState state_;
   esphome::cover::Cover *cover_{nullptr};
   esphome::PollingComponent *poller_{nullptr};
@@ -180,8 +230,9 @@ class Motor {
 };
 
 // The broadcast cover: average position of the online motors with a known
-// position; opening/closing while more of them open/close than the other
-// way.  Keeps its last state while no motor is online.
+// position (or, after a power loss, the position their covers still show);
+// opening/closing while more of them open/close than the other way.  Keeps
+// its last state while no motor is online.
 class Group {
  public:
   explicit Group(esphome::cover::Cover *cover) : cover_(cover) { groups().push_back(this); }
@@ -190,7 +241,7 @@ class Group {
     float sum = 0;
     int count = 0, opening = 0, closing = 0;
     for (const Motor *motor : motors()) {
-      if (!motor->online() || !motor->has_position())
+      if (!motor->online() || !(motor->has_position() || motor->position_lost()))
         continue;
       sum += motor->cover()->position;
       count++;

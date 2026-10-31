@@ -35,13 +35,14 @@ substitutions:
   offline_timeout: 90s        # no reply for this long → Online off
 
   # ── Position direction ────────────────────────────────────────────────────
-  # Which end the motors count their raw position (0–100) from depends on
-  # how their end limits were set (README → Position conventions).
-  #   true:  raw 0 = open, 100 = closed   (this installation, since 2026-10-31)
+  # The motors count their raw position (0–100) from the first end limit
+  # they reach after a power loss, so raw 0 is open or closed, per motor
+  # (README → Position conventions).  The firmware learns it from the
+  # motor's moves and keeps it across reboots; this is only the start value
+  # for a motor it has not learned yet.
+  #   true:  raw 0 = open, 100 = closed
   #   false: raw 0 = closed, 100 = open
-  # Check: with an awning fully open, the log shows "Motor N  open=…%
-  # (raw 0)" → true, "(raw 100)" → false.  Per motor: add
-  # position_reversed to that motor's vars below.
+  # Per motor: add position_reversed to that motor's vars below.
   position_reversed: "true"
 
   # ── Channel bytes ─────────────────────────────────────────────────────────
@@ -140,7 +141,7 @@ esphome:
   # Bump the version on every firmware-relevant change (README → Versioning).
   project:
     name: jooonaaassssss.gumax-sunshade-esphome
-    version: "1.5.0"
+    version: "1.6.0"
 
 esp32:
   board: esp32-s3-devkitc-1
